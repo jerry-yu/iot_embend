@@ -900,6 +900,8 @@ dependencies = [
  "ethereum-types 0.9.0",
  "futures 0.3.4",
  "lazy_static",
+ "libsm",
+ "rand 0.7.3",
 ]
 
 [[package]]
@@ -947,6 +949,20 @@ name = "libc"
 version = "0.2.68"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dea0c0405123bba743ee3f91f49b1c7cfb684eef0da0a50110f758ccf24cdff0"
+
+[[package]]
+name = "libsm"
+version = "0.3.0"
+source = "git+https://github.com/citahub/libsm?rev=ac323abd3512a9fdb8bfd6cd349a6fc46deb688f#ac323abd3512a9fdb8bfd6cd349a6fc46deb688f"
+dependencies = [
+ "byteorder",
+ "lazy_static",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "rand 0.4.6",
+ "yasna",
+]
 
 [[package]]
 name = "lock_api"

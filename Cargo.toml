@@ -11,4 +11,7 @@ async-std = "1.5.0"
 lazy_static = "1.4.0"
 ethereum-types = "0.9.0"
 futures = "0.3.4"
+rand = "0.7.3"
+#serde_json = "1.0.51"
+libsm = { git = "https://github.com/citahub/libsm", rev = "ac323abd3512a9fdb8bfd6cd349a6fc46deb688f" }
 cita-tool = { git = "https://github.com/citahub/cita-cli", branch = "master"}
