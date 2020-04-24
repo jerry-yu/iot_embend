@@ -24,12 +24,13 @@ use futures::{
     channel::{mpsc},
     select, FutureExt, SinkExt,
 };
-use handler::{Address,Iot,sm3,TYPE_TOBE_SENT_DATA,TYPE_SIGN_REQ,TYPE_SIGN_RES};
+use handler::{Address,Iot,sm3,TYPE_TOBE_SENT_DATA};
 use chain::{ToChainInfo,ChainInfo ,ChainOp};
 use payload::Header;
 use std::time::Duration;
 use rand::Rng;
 use std::convert::TryInto;
+use sqlite::Connection;
 
 const CHAIN_VIST_INTERVAL:u64 = 3;
 const CHAIN_HEIGHT_TIMES:u64 = 2;
@@ -66,6 +67,7 @@ async fn main_process(
     mut main_from_chain:  mpsc::UnboundedReceiver<ChainInfo>,
     mut main_from_net:  mpsc::UnboundedReceiver<(usize,Header,Vec<u8>)>,
     mut main_from_listener : mpsc::UnboundedReceiver<(usize,TcpStream)>,
+    sql_con : Connection,
 ) -> Result<()> {
     let mut iot = Iot::new(WAL_DIR,CONF_DIR);
     if !iot.need_config() {
@@ -223,7 +225,7 @@ async fn chain_loop(
 
 fn main() -> Result<()> {
     //let (chain_sender,from_chain) = mpsc::unbounded::<H256>();
-    //let iot_static: Arc<Mutex<Iot>> = Arc::new(Mutex::new(Iot::new()));
+    
     
     task::block_on(async {
         let listener = TcpListener::bind("0.0.0.0:18888").await?;
@@ -233,10 +235,20 @@ fn main() -> Result<()> {
         let (chain_to_main,  main_from_chain) = mpsc::unbounded();
         let (net_to_main,  main_from_net) = mpsc::unbounded();
         let (mut listener_to_main,  main_from_listener) = mpsc::unbounded();
+        let connection = sqlite::open("./db").unwrap();
+        connection
+        .execute(
+        "CREATE TABLE IF NOT EXISTS txs(
+            id INTEGER PRIMARY KEY, 
+            value INTEGER NOT NULL,
+            data TEXT NOT NULL,
+            hash TEXT DEFAULT \"none\" NOT NULL,
+        );
+        ")
+        .unwrap();
 
         let ctsk = task::spawn(chain_loop(chain_to_main.clone(), chain_from_main));
-
-        let ptsk = task::spawn(main_process(main_to_chain, main_from_chain, main_from_net,main_from_listener));
+        let ptsk = task::spawn(main_process(main_to_chain, main_from_chain, main_from_net,main_from_listener,connection));
 
         let mut incoming = listener.incoming();
         let mut stream_id:usize = 0;

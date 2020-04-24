@@ -97,19 +97,6 @@ impl Iot {
         let mut header = Header::default();
         header.id = id as u16;
         header.len = 0;
-
-        if self.rpc_url.is_none() {
-            header.ptype = TYPE_URL_REQ;
-            self.send(id,&header.clone().to_vec()).await?;
-        }  
-        if self.dst_account.is_none() {
-            header.ptype = TYPE_ACCOUNT_REQ;
-            self.send(id,&header.clone().to_vec()).await?;
-        }
-        if self.my_account.is_none() {
-            header.ptype = TYPE_PK_REQ;
-            self.send(id,&header.clone().to_vec()).await?;
-        }
         Ok(())
     }
 
@@ -133,7 +120,7 @@ impl Iot {
                     let mut ack_head = Header::default();
                     // just use this;non sense
                     ack_head.id = id as u16;
-                    ack_head.ptype = TYPE_OP_PK_RES;
+                    ack_head.ptype = 0xff;
                     let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
                     ack_head.len = abytes.len() as u32;
                     let mut data = ack_head.to_vec();
@@ -143,7 +130,7 @@ impl Iot {
             }
             TYPE_OP_PK_REQ => {
                 let mut ack_head = hder;
-                ack_head.ptype = TYPE_OP_PK_RES;
+                ack_head.ptype = 0xff;
 
                 if self.my_account.is_some() {
                     let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
@@ -167,7 +154,7 @@ impl Iot {
             }
             TYPE_TOBE_SENT_DATA => {
                 let mut ack_head = hder;
-                ack_head.ptype = TYPE_TOBE_ACK_DATA;
+                ack_head.ptype = 0xff;
                 ack_head.len = 4;
                 let mut ack_data = vec!(0;4);
                 let mut data = ack_head.to_vec();
