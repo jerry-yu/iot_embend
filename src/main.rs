@@ -1,4 +1,4 @@
-#![recursion_limit="256"]
+#![recursion_limit="1024"]
 
 mod handler;
 mod payload;
@@ -12,21 +12,24 @@ use async_std::task;
 use async_std::future;
 use async_std::fs;
 use cita_tool::{
-    client::{remove_0x,
+    encode,decode,ProtoMessage,
+    client::{remove_0x,TransactionOptions,
         basic::{ClientExt,Client},
     },
     protos::blockchain::{Transaction, UnverifiedTransaction},
     rpctypes::{JsonRpcResponse,ResponseValue,ParamsValue},
 };
-use ethereum_types::{H256};
+use ethereum_types::{H256,U256};
 use futures::{
     channel::{mpsc},
     select, FutureExt, SinkExt,
 };
-use handler::{Address,Iot};
-use chain::ChainOp;
+use handler::{Address,Iot,sm3,TYPE_TOBE_SENT_DATA,TYPE_SIGN_REQ,TYPE_SIGN_RES};
+use chain::{ToChainInfo,ChainInfo ,ChainOp};
 use payload::Header;
 use std::time::Duration;
+use rand::Rng;
+use std::convert::TryInto;
 
 const CHAIN_VIST_INTERVAL:u64 = 3;
 const CHAIN_HEIGHT_TIMES:u64 = 2;
@@ -59,23 +62,32 @@ async fn network_process(id:usize,net_reader: TcpStream, mut net_to_main:  mpsc:
 }
 
 async fn main_process(
-    main_to_chain: mpsc::UnboundedSender<ToChainInfo>,
+    mut main_to_chain: mpsc::UnboundedSender<ToChainInfo>,
     mut main_from_chain:  mpsc::UnboundedReceiver<ChainInfo>,
     mut main_from_net:  mpsc::UnboundedReceiver<(usize,Header,Vec<u8>)>,
     mut main_from_listener : mpsc::UnboundedReceiver<(usize,TcpStream)>,
 ) -> Result<()> {
     let mut iot = Iot::new(WAL_DIR,CONF_DIR);
-    let mut rng = rand::thread_rng();
     if !iot.need_config() {
-
+        //send
     }
     loop {
         select! {
             info = main_from_chain.next().fuse() => match info {
                 Some(info) => {
                     match info {
-                        ChainInfo::Height(h) => {
+                        ChainInfo::UnsignHash(id,mut data) => {
+                            let mut req_head = Header::default();
+                            // just use this;non sense
+                            req_head.id = id;
+                            req_head.ptype = TYPE_SIGN_REQ;
+                            req_head.len = data.len() as u32;
+                            let mut buf = req_head.to_vec();
+                            buf.append(&mut data);
                             
+                            if let Some(mut tcp) = iot.get_one_tcp() {
+                                tcp.write_all(&buf).await?;
+                            }
                         }
 
                         _ => {}
@@ -86,20 +98,24 @@ async fn main_process(
             data = main_from_net.next().fuse() => match data {
                 Some((id,header,payload)) => {
                     if let Some(data) = iot.proc_body(id,header, &payload) {
-                        if heder.ptype == TYPE_TOBE_SENT_DATA {
-                            let rnum:u64 = rand::thread_rng().gen();
-                            let fname = format!("{}/{:x}",WAL_DIR,rnum);
+                        if header.ptype == TYPE_TOBE_SENT_DATA {
+                            let nonce:usize = rand::thread_rng().gen();
+                            let fname = format!("{}/{:x}",WAL_DIR,nonce);
 
-                            pritnln!("file num {:?}",fname);
+                            println!("file num {:?}",fname);
 
-                            let mut file = File::create(fname).await?;
-                            file.write_all(payload).await?;
-                            
-                            main_to_chain.send((rnum,payload.to_vec())).await?;
+                            let mut file = fs::File::create(fname).await?;
+                            file.write_all(&payload).await?;
+                            let value = u64::from_be_bytes(payload[0..8].try_into().unwrap());
                             //let value:u64 = u64::from_be_bytes(body[0..8].try_into().unwrap());
+                            let data = payload[8..].to_vec();
+                            main_to_chain.send(ToChainInfo::Data(nonce,value,payload.to_vec())).await?;
+                            
+                        } else if header.ptype == TYPE_SIGN_RES {
+                            let id = header.id;
+                            main_to_chain.send(ToChainInfo::Sign(id,payload)).await?;
                         }
                         iot.send(id,&data).await;
-                        
                     }
                 },
                 None=> break,
@@ -112,25 +128,11 @@ async fn main_process(
                     }
                 } ,
                 None => break,
-                
             },
         }
     }
     
     Ok(())
-}
-
-pub enum ChainInfo {
-    SucHash(H256),
-    Height(usize),
-    SentHash(H256),
-    
-}
-
-pub enum ToChainInfo {
-    Data(usize,Vec<u8>),
-    Url(String),
-    DstAccount(Address),
 }
 
 async fn chain_loop(
@@ -139,25 +141,65 @@ async fn chain_loop(
 ) -> Result<()> {
     let tval = Duration::new(CHAIN_VIST_INTERVAL,0);
     let mut hc = Client::new().set_uri("http://122.112.142.180:1337");
-    let hc = Mutex::new(hc);
+    let hc = Mutex::new(Client::new());
     let mut count:u64 = 0;
-    let mut op =  ChainOp::default();
+    let mut op =  ChainOp::new(WAL_DIR);
     loop {
         match future::timeout(tval,chain_from_main.next()).await {
             Ok(Some(data)) => {
                 match data {
-                    ToChainInfo::Data(nonce,data) => {
+                    ToChainInfo::Data(nonce,value,data) => {
+                        if op.need_config() {
+                            op.save_chain_info(ToChainInfo::Data(nonce,value,data));
+                        } else {
+                            let tx_opt = TransactionOptions::new();
+                            let code_str = format!("{}",encode(data.clone()));
+                            let account_str = format!("{:x}",op.dst_account.unwrap());
+                            let nonce_str = format!("{:x}",nonce);
+                            tx_opt.set_code(&code_str);
+                            tx_opt.set_value(Some(value.into()));
+                            tx_opt.set_address(&account_str);
 
+                            if let Ok(mut tx) = hc.lock().await.generate_transaction(tx_opt) {
+                                tx.set_nonce(nonce_str);
+                                if let Ok(btx) = tx.write_to_bytes() {
+                                    let hash = sm3::hash::Sm3Hash::new(&btx).get_hash();
+                                    let id = op.get_id();
+                                    op.save_tx(id,tx);
+
+                                    chain_to_main.send(ChainInfo::UnsignHash(id,hash.to_vec())).await;
+                                } else {
+                                    println!("Tx write error");
+                                }
+                                
+                            } else {
+                                op.save_chain_info(ToChainInfo::Data(nonce,value,data));
+                            }
+                        }
+                        
                     }
-                    ToChainInfo::DstAccount(account) => {
-                        op.dst_account = Some(account);
-                    }
-                    ToChainInfo::Url(url) => {
-                        hc.lock().await.set_uri(&url);
+            
+                    ToChainInfo::Sign(id,sign_data) => {
+                        let mut utx = UnverifiedTransaction::new();
+                        if let Some(tx) = op.saved_tx.get(&id) {
+                            let nonce = tx.get_nonce();
+                            utx.set_transaction(tx.clone());
+                            utx.set_signature(sign_data);
+
+                            if let Ok(bytes_code) = utx.write_to_bytes() {
+                                let utx_str = encode(bytes_code);
+                                if let Ok(res) = hc.lock().await.send_signed_transaction(&utx_str) {
+                                    let hash = ChainOp::parse_json_hash(res);
+                                    if !hash.is_empty() {
+                                        fs::rename(op.file_name(nonce),op.file_name(&hash)).await;
+                                    }
+                                }
+                            }
+                        }
+
+                        op.saved_tx.remove(&id);
                     }
                 }
-                
-               
             },
             Ok(None) => {}
             Err(_) => {
@@ -165,25 +207,10 @@ async fn chain_loop(
                 if count % CHAIN_HEIGHT_TIMES == 0 {
                     if let Ok(res) = hc.lock().await.get_block_number() {
                         println!("chain loop get something {:?}",res);
-                        if let Some(res) =  res.result() {
-                           
-                            match res {
-                                ResponseValue::Singe(v) => {
-                                    match v {
-                                        ParamsValue::String(mut s) => {
-                                            let s = remove_0x(&s);
-                                            if let Ok(h) = s.parse::<usize>() {
-                                                println!("chain get height str {:?}",h);
-                                                chain_to_main.send(ChainInfo::Height(h)).await?;
-                                            }
-                                        }
-                                        _=>{}
-                                    }
-                                },
-                                _  => {},
-                            }
+                        let h = ChainOp::parse_json_height(res); 
+                        if h > 0 {
+                            chain_to_main.send(ChainInfo::Height(h)).await?;
                         }
-
                     }
                 }
              

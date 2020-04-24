@@ -4,36 +4,25 @@ use cita_tool::{
     client::basic::Client,
     protos::blockchain::{Transaction, UnverifiedTransaction},
 };
-use ethereum_types::{H160, H256};
+pub use ethereum_types::{H160, H256};
 use futures::{channel::mpsc, select, FutureExt, SinkExt};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 use async_std::net::{TcpStream};
-use std::collections::HashMap;
-use libsm::sm3;
+use std::collections::BTreeMap;
+pub use libsm::sm3;
 use std::convert::TryInto;
 use crate::payload::Header;
-use rand::prelude::*;
 use std::io::Read;
 use std::str::FromStr;
 
 pub type Address = H160;
 
-const TYPE_HB: u8 = 0;
-const TYPE_PK_REQ: u8 = 1;
-const TYPE_PK_RES: u8 = 2;
-const TYPE_SIGN_REQ: u8 = 3;
-const TYPE_SIGN_RES: u8 = 4;
-const TYPE_OP_PK_REQ: u8 = 5;
-const TYPE_OP_PK_RES: u8 = 6;
-const TYPE_URL_REQ: u8 = 7;
-const TYPE_URL_RES: u8 = 8;
-const TYPE_ACCOUNT_REQ: u8 = 9;
-const TYPE_ACCOUNT_RES: u8 = 10;
-const TYPE_TOBE_SENT_DATA: u8 = 11;
-const TYPE_TOBE_ACK_DATA: u8 = 12;
+pub const TYPE_CHIP_REQ: u8 = 1;
+pub const TYPE_CHIP_RES: u8 = 2;
+pub const TYPE_TOBE_SENT_DATA: u8 = 3;
 
 const URL_FILE :&'static str = "url";
 const ACCOUNT_FILE :&'static str = "dst_account";
@@ -45,7 +34,7 @@ pub struct Iot {
     pub dst_account: Option<Address>,
     pub my_account: Option<Address>,
     pub used: bool,
-    pub links: HashMap<usize,TcpStream>,
+    pub links: BTreeMap<usize,TcpStream>,
     //current_hight: 
 }
 
@@ -60,10 +49,17 @@ impl Iot {
             dst_account: None,
             my_account: None,
             used: false,
-            links:HashMap::new(),
+            links:BTreeMap::new(),
         };
         tmp.load_file(dir,conf_dir);
         tmp
+    }
+
+    pub fn get_one_tcp(&self) ->Option<&TcpStream> {
+        for tcp in self.links.values() {
+            return Some(tcp);
+        }
+        None
     }
 
     fn load_file(&mut self,dir:&str,conf_dir:&str) {
@@ -125,13 +121,10 @@ impl Iot {
     }
 
     pub fn proc_body(&mut self, id:usize, hder: Header, body: &[u8]) -> Option<Vec<u8>> {
-        println!("iot proc body");
-        let x = 
-        let hash = sm3::hash::Sm3Hash::new(body).get_hash();
+        println!("iot proc body headerf {:?}",hder);
         match hder.ptype {
-            TYPE_HB => {
-                
-            }
+            TYPE_HB => {}
+            TYPE_SIGN_RES => {}
             TYPE_PK_RES => {
                 let hash = sm3::hash::Sm3Hash::new(body).get_hash();
                 self.my_account = Some(Address::from_slice(&hash));
@@ -163,9 +156,7 @@ impl Iot {
                     return Some(ack_head.to_vec());
                 }
             }
-            TYPE_SIGN_RES => {
-
-            }
+            
             TYPE_URL_RES => {
                 if let Ok(url) = String::from_utf8(body.to_vec()) {
                     self.rpc_url = Some(url);
@@ -178,7 +169,7 @@ impl Iot {
                 let mut ack_head = hder;
                 ack_head.ptype = TYPE_TOBE_ACK_DATA;
                 ack_head.len = 4;
-                let ack_data = vec!(0;4);
+                let mut ack_data = vec!(0;4);
                 let mut data = ack_head.to_vec();
                 data.append(&mut ack_data);
                 return Some(data);
