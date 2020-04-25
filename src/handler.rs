@@ -35,7 +35,6 @@ pub struct Iot {
     pub my_account: Option<Address>,
     pub used: bool,
     pub links: BTreeMap<usize,TcpStream>,
-    //current_hight: 
 }
 
 impl Iot {

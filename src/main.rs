@@ -70,9 +70,8 @@ async fn main_process(
     sql_con : Connection,
 ) -> Result<()> {
     let mut iot = Iot::new(WAL_DIR,CONF_DIR);
-    if !iot.need_config() {
-        //send
-    }
+    // TODO: sql_con get unused record 
+    // select * from txs where hash is null;
     loop {
         select! {
             info = main_from_chain.next().fuse() => match info {
@@ -82,7 +81,7 @@ async fn main_process(
                             let mut req_head = Header::default();
                             // just use this;non sense
                             req_head.id = id;
-                            req_head.ptype = TYPE_SIGN_REQ;
+                            req_head.ptype = 0xff;
                             req_head.len = data.len() as u32;
                             let mut buf = req_head.to_vec();
                             buf.append(&mut data);
@@ -113,7 +112,7 @@ async fn main_process(
                             let data = payload[8..].to_vec();
                             main_to_chain.send(ToChainInfo::Data(nonce,value,payload.to_vec())).await?;
                             
-                        } else if header.ptype == TYPE_SIGN_RES {
+                        } else if header.ptype == 0xff {
                             let id = header.id;
                             main_to_chain.send(ToChainInfo::Sign(id,payload)).await?;
                         }
@@ -201,6 +200,8 @@ async fn chain_loop(
 
                         op.saved_tx.remove(&id);
                     }
+
+                    _ =>{}
                 }
             },
             Ok(None) => {}
@@ -242,7 +243,7 @@ fn main() -> Result<()> {
             id INTEGER PRIMARY KEY, 
             value INTEGER NOT NULL,
             data TEXT NOT NULL,
-            hash TEXT DEFAULT \"none\" NOT NULL,
+            hash TEXT NULL,
         );
         ")
         .unwrap();
