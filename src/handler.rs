@@ -17,12 +17,8 @@ use std::convert::TryInto;
 use crate::payload::Header;
 use std::io::Read;
 use std::str::FromStr;
-
 pub type Address = H160;
 
-pub const TYPE_CHIP_REQ: u8 = 1;
-pub const TYPE_CHIP_RES: u8 = 2;
-pub const TYPE_TOBE_SENT_DATA: u8 = 3;
 
 const URL_FILE :&'static str = "url";
 const ACCOUNT_FILE :&'static str = "dst_account";
@@ -35,6 +31,7 @@ pub struct Iot {
     pub my_account: Option<Address>,
     pub used: bool,
     pub links: BTreeMap<usize,TcpStream>,
+    pub states: BTreeMap<usize,bool>,
 }
 
 impl Iot {
@@ -49,16 +46,27 @@ impl Iot {
             my_account: None,
             used: false,
             links:BTreeMap::new(),
+            states:BTreeMap::new(),
         };
         tmp.load_file(dir,conf_dir);
         tmp
     }
 
-    pub fn get_one_tcp(&self) ->Option<&TcpStream> {
-        for tcp in self.links.values() {
-            return Some(tcp);
-        }
-        None
+    pub fn get_state(&self,stream_id:usize) ->Option<bool> {
+        self.states.get(&stream_id).cloned()
+    }
+
+    // false: wait for pubkey ,true wait for signature
+    pub fn change_state(&mut self,stream_id:usize,state:bool) {
+        self.states.insert(stream_id,state);
+    }
+
+    pub fn clean_state(&mut self,stream_id:usize) {
+        self.states.remove(&stream_id);
+    }
+
+    pub fn get_tcp(&self,stream_id:usize) ->Option<&TcpStream> {
+        self.links.get(&stream_id)
     }
 
     fn load_file(&mut self,dir:&str,conf_dir:&str) {
@@ -99,72 +107,64 @@ impl Iot {
         Ok(())
     }
 
-    pub async fn send(&mut self,id:usize,data: &[u8]) ->std::io::Result<()>  {
+    pub async fn send_net_data(&mut self,id:usize,data: &[u8]) ->std::io::Result<()>  {
         if let Some(tcp) = self.links.get_mut(&id) {
             tcp.write_all(data).await?;
         }
         Ok(())
     }
 
+    pub async fn send_any_net_data(&mut self,data: &[u8]) -> std::io::Result<usize> {
+        let mut res = Ok(());
+        for (idx,tcp) in &mut self.links {
+          res = tcp.write_all(data).await;
+          if res.is_ok() {
+              return Ok(*idx);
+          }
+        }
+        Err(res.unwrap_err())
+    }
+
     pub fn proc_body(&mut self, id:usize, hder: Header, body: &[u8]) -> Option<Vec<u8>> {
         println!("iot proc body headerf {:?}",hder);
-        match hder.ptype {
-            TYPE_HB => {}
-            TYPE_SIGN_RES => {}
-            TYPE_PK_RES => {
-                let hash = sm3::hash::Sm3Hash::new(body).get_hash();
-                self.my_account = Some(Address::from_slice(&hash));
+        // match hder.ptype {
+        //     TYPE_PK_RES => {
+        //         let hash = sm3::hash::Sm3Hash::new(body).get_hash();
+        //         self.my_account = Some(Address::from_slice(&hash));
 
-                {
-                    let mut ack_head = Header::default();
-                    // just use this;non sense
-                    ack_head.id = id as u16;
-                    ack_head.ptype = 0xff;
-                    let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
-                    ack_head.len = abytes.len() as u32;
-                    let mut data = ack_head.to_vec();
-                    data.append(&mut abytes);
-                    return Some(data);
-                }
-            }
-            TYPE_OP_PK_REQ => {
-                let mut ack_head = hder;
-                ack_head.ptype = 0xff;
+        //         {
+        //             let mut ack_head = Header::default();
+        //             // just use this;non sense
+        //             ack_head.id = id as u16;
+        //             ack_head.ptype = 0xff;
+        //             let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
+        //             ack_head.len = abytes.len() as u32;
+        //             let mut data = ack_head.to_vec();
+        //             data.append(&mut abytes);
+        //             return Some(data);
+        //         }
+        //     }
+        //     TYPE_OP_PK_REQ => {
+        //         let mut ack_head = hder;
+        //         ack_head.ptype = 0xff;
 
-                if self.my_account.is_some() {
-                    let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
-                    ack_head.len = abytes.len() as u32;
-                    let mut data = ack_head.to_vec();
-                    data.append(&mut abytes);
-                    return Some(data);
-                } else {
-                    ack_head.len = 0;
-                    return Some(ack_head.to_vec());
-                }
-            }
+        //         if self.my_account.is_some() {
+        //             let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
+        //             ack_head.len = abytes.len() as u32;
+        //             let mut data = ack_head.to_vec();
+        //             data.append(&mut abytes);
+        //             return Some(data);
+        //         } else {
+        //             ack_head.len = 0;
+        //             return Some(ack_head.to_vec());
+        //         }
+        //     }
             
-            TYPE_URL_RES => {
-                if let Ok(url) = String::from_utf8(body.to_vec()) {
-                    self.rpc_url = Some(url);
-                }
-            }
-            TYPE_ACCOUNT_RES => {
-                self.dst_account = Some(Address::from_slice(body));
-            }
-            TYPE_TOBE_SENT_DATA => {
-                let mut ack_head = hder;
-                ack_head.ptype = 0xff;
-                ack_head.len = 4;
-                let mut ack_data = vec!(0;4);
-                let mut data = ack_head.to_vec();
-                data.append(&mut ack_data);
-                return Some(data);
-            }
 
-            _ => {
-                println!("get data unused type, header {:?}",hder);
-            }
-        }
+        //     _ => {
+        //         println!("get data unused type, header {:?}",hder);
+        //     }
+        // }
 
         None
         //Some("hello".as_bytes().into())
