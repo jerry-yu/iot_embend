@@ -38,6 +38,12 @@ impl Payload {
         }
     }
 
+    pub fn pack_head_and_payload(hd: Header, data: Vec<u8>) -> Vec<u8> {
+        let mut buf = hd.to_vec();
+        buf.extend(data);
+        buf
+    }
+
     pub fn pack_head_data(ptype: u8, id: u16, len: u32) -> Vec<u8> {
         let mut req_head = Header::default();
         req_head.id = id;

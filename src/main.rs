@@ -23,11 +23,10 @@ use cita_tool::{
     ProtoMessage, H256, U256,
 };
 
-use chain::{ChainInfo, ChainOp, RawChainData, ToChainInfo};
+use chain::{ChainInfo, ChainOp, RawChainData, ToChainInfo, TABLE_SQL};
 use cita_tool::{
-    pubkey_to_address, secp256k1_sign, sign, sm2_sign, CreateKey, Encryption, Hashable, KeyPair,
-    Message, PrivateKey, PubKey, Secp256k1KeyPair, Secp256k1PrivKey, Secp256k1PubKey, Signature,
-    Sm2KeyPair, Sm2Privkey, Sm2Pubkey, Sm2Signature,
+    pubkey_to_address, sign, sm2_sign, CreateKey, Encryption, Hashable, KeyPair, Message,
+    PrivateKey, PubKey, Signature, Sm2KeyPair, Sm2Privkey, Sm2Pubkey, Sm2Signature,
 };
 use clap::{App, Arg};
 use config::{AllConfig, Config, DevAddr};
@@ -40,21 +39,14 @@ use rand::Rng;
 use sqlite::Connection;
 use std::convert::TryInto;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-const CHAIN_VIST_INTERVAL: u64 = 3;
-const CHAIN_HEIGHT_TIMES: u64 = 9;
-const CHAIN_TX_HASH_TIMES: u64 = 3;
+const CHAIN_VIST_INTERVAL: u64 = 1;
+const CHAIN_HEIGHT_TIMES: u64 = 10;
 
 const WAL_DIR: &'static str = "./wal";
 const CONF_DIR: &'static str = "./conf";
 const FUNC_HASH: &'static str = "2c0e9055";
-const TABLE_SQL: &'static str = " 
-CREATE TABLE IF NOT EXISTS txs(
-    id INTEGER PRIMARY KEY, 
-    value INTEGER NOT NULL,
-    data TEXT NOT NULL,
-    hash BLOB default NULL);";
 
 // lazy_static::lazy_static!{
 //     static ref ONE_IOT:Arc<Mutex<Iot>> = Arc::new(Mutex::new(Iot::new()));
@@ -68,31 +60,28 @@ async fn network_process(
 ) -> io::Result<()> {
     let mut reader = BufReader::new(net_reader.clone());
     loop {
-        println!("network");
         let mut head_buff = vec![0; 8];
         reader.read_exact(&mut head_buff).await?;
-        println!("read_exact");
         let header = Header::parse(&head_buff);
         let mut body = vec![0; header.len as usize];
         reader.read_exact(&mut body).await?;
+        println!("net read data header {:?}", header);
         net_to_main.send((id, header, body)).await;
     }
 }
 
-fn get_pk_from_file(dfile:String) ->Option<Vec<u8>> {
+fn get_pk_from_file(dfile: String) -> Option<Vec<u8>> {
     if let Ok(dv) = std::fs::read_to_string(dfile) {
         if let Ok(dev) = toml::from_str::<DevAddr>(&dv) {
             if !dev.dev_addr.is_empty() && !dev.dev_pk.is_empty() {
                 if let Ok(pk) = PK::from_str(remove_0x(&dev.dev_pk)) {
-                   return Some(pk.to_vec());
+                    return Some(pk.to_vec());
                 }
             }
         }
     }
     None
-    
 }
-
 
 async fn main_process(
     mut main_to_chain: mpsc::UnboundedSender<ToChainInfo>,
@@ -105,10 +94,10 @@ async fn main_process(
     let mut iot = Iot::new("", &config.dev_file);
     let pk = get_pk_from_file(config.dev_file);
     if let Some(pk) = pk {
-        iot.self_pk = Some(pk);
+        iot.self_pk = Some(pk.clone());
         main_to_chain.send(ToChainInfo::SelfPK(pk)).await?;
     }
-    
+
     let addr = Address::from_str(remove_0x(&config.conf.account));
     if addr.is_err() {
         std::process::exit(1);
@@ -127,7 +116,7 @@ async fn main_process(
 
     let to_be_del_hash = ChainOp::get_undeleted_hash(&sql_con);
     for hash in to_be_del_hash {
-        main_to_chain.send(ToChainInfo::DelHash(hash)).await?;
+        main_to_chain.send(ToChainInfo::UndecideHash(hash)).await?;
     }
 
     loop {
@@ -135,14 +124,21 @@ async fn main_process(
             info = main_from_chain.next().fuse() => match info {
                 Some(info) => {
                     match info {
-                        ChainInfo::UnsignHash(req_id,data) => {
-                            let data = Payload::pack_chip_data(ChipCommand::Signature, Some(data));
-                            let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id,data.len() as u32);
-                            buf.extend(data);
-                            let _ = iot.send_any_net_data(&buf).await;
+                        ChainInfo::UnsignHash(req_id,hash) => {
+                            if iot.tobe_signed_datas.is_empty() && !iot.need_chip_pk() {
+                                let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash.clone()));
+                                let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id,data.len() as u32);
+                                buf.extend(data);
+                                println!("send tobe sig hash req id {}",req_id);
+                                let _ = iot.send_any_net_data(&buf).await;
+                            }
+                            iot.tobe_signed_datas.push_back((req_id,hash));
                         }
                         ChainInfo::SignedHash(nonce,hash) => {
                             ChainOp::update_data_hash(&sql_con,nonce,&hash);
+                        }
+                        ChainInfo::SuccHash(hash) => {
+                            ChainOp::delete_data_with_hash(&sql_con,&hash);
                         }
                         _ => {}
                     }
@@ -182,10 +178,24 @@ async fn main_process(
                             iot.send_net_data(stream_id, &hbuf).await;
                         } else if payload.len() == 0x40 {
                             if header.id > 0 {
+                                iot.remove_signed_data(header.id);
                                 main_to_chain.send(ToChainInfo::Sign(header.id,payload)).await?;
                             } else {
                                 main_to_chain.send(ToChainInfo::SelfPK(payload.clone())).await?;
+                                iot.self_pk = Some(payload.clone());
+
+                                //send to be signed data
+                                if let Some((req_id,data)) = iot.tobe_signed_datas.front() {
+                                    let data = Payload::pack_chip_data(ChipCommand::Signature, Some(data.clone()));
+                                    let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, *req_id,data.len() as u32);
+                                    buf.extend(data);
+                                    println!("send tobe sig hash req id {},when pk gotten",req_id);
+                                    let _ = iot.send_any_net_data(&buf).await;
+                                }
+
                                 let hash = sm3::hash::Sm3Hash::new(&payload).get_hash();
+                                // let mut hash: [u8]= [0;32];
+                                // payload.sm3_crypt_hash_into(&mut hash);
                                 let addr = Address::from(H256::from(hash));
 
                                 let dev = DevAddr {
@@ -241,53 +251,83 @@ async fn chain_loop(
             Ok(Some(data)) => {
                 match data {
                     ToChainInfo::Data(raw_data) => {
-                        let tx_opt = TransactionOptions::new();
                         let code_str = encode_params(
                             &["string".to_string(), "uint".to_string()],
                             &[raw_data.data, raw_data.value.to_string()],
                             true,
                         );
-                        println!("encode_params {:?}", code_str);
+
                         if let Ok(code_str) = code_str {
                             let account_str = format!("{:x}", op.dst_account.unwrap());
                             let nonce_str = format!("{:x}", raw_data.nonce);
                             let mut code = FUNC_HASH.to_string();
                             code = code + &code_str;
-                            tx_opt.set_code(&code);
-                            tx_opt.set_address(&account_str);
-                            println!(
-                                "encode_params code {:?},account {:?} nonce {:?}",
-                                code, account_str, nonce_str
-                            );
+
+                            let mut h = None;
+
+                            if op.chain_height.is_some()
+                                && Instant::now().duration_since(op.chain_height.unwrap().0)
+                                    < Duration::new(200, 0)
+                            {
+                                h = Some(op.chain_height.unwrap().1)
+                            } else {
+                                if let Ok(res) = hc.lock().await.get_block_number() {
+                                    if let Some(qh) = ChainOp::parse_json_height(res) {
+                                        op.chain_height = Some((Instant::now(), qh));
+                                        h = Some(qh);
+                                    }
+                                }
+                            }
+
+                            let tx_opt = TransactionOptions::new()
+                                .set_current_height(h)
+                                .set_code(&code)
+                                .set_address(&account_str);
+                            // println!(
+                            //     "encode_params  account {:?} nonce {:?} txopt{:?}",
+                            //     account_str, nonce_str, tx_opt
+                            // );
                             if let Ok(mut tx) = hc.lock().await.generate_transaction(tx_opt) {
                                 // Use input random number as nonce
+                                // println!(
+                                //     "chain raw data gen nonce {:?} data {:x?}",
+                                //     nonce_str,
+                                //     tx.get_data()
+                                // );
                                 tx.set_nonce(nonce_str);
-                                if let Ok(btx) = tx.write_to_bytes() {
-                                    let hash = sm3::hash::Sm3Hash::new(&btx).get_hash();
-                                    let inc_id = op.get_id();
-                                    println!("tx sm3 hash {:?} inc_id {}", hash, inc_id);
-                                    op.save_tx(inc_id, tx);
-
-                                    chain_to_main
-                                        .send(ChainInfo::UnsignHash(inc_id, hash.to_vec()))
-                                        .await?;
+                                if op.tx_empty() {
+                                    if let Some(hash) = op.chain_to_sign_data(&tx) {
+                                        let inc_id = op.get_id();
+                                        op.save_tx(inc_id, tx);
+                                        chain_to_main
+                                            .send(ChainInfo::UnsignHash(inc_id, hash))
+                                            .await?;
+                                    }
                                 } else {
-                                    println!("Tx write error");
+                                    let id = op.get_id();
+                                    op.save_tx(id, tx);
                                 }
                             } else {
-                                //op.save_chain_info(ToChainInfo::Data(raw_data));
+                                println!("generate transaction error");
                             }
                         } else {
+                            println!("encode param error");
                         }
                     }
                     ToChainInfo::SelfPK(pk) => {
                         op.self_pk = Some(pk);
                     }
-
                     ToChainInfo::Sign(id, sign_data) => {
-                        let mut utx = UnverifiedTransaction::new();
-                        if let Some(tx) = op.saved_tx.get(&id) {
-                            let nonce = tx.get_nonce().parse::<u64>().unwrap();
+                        if let Some(tx) = op.saved_tx.remove(&id) {
+                            if let Some((id, tx)) = op.first_tx() {
+                                if let Some(buf) = op.chain_to_sign_data(&tx) {
+                                    chain_to_main.send(ChainInfo::UnsignHash(id, buf)).await?;
+                                }
+                            }
+                            let nstr = tx.get_nonce();
+                            let nonce = u64::from_str_radix(nstr, 16).unwrap();
+                            println!("get nonce {:?} data {:x?}", nonce, tx.get_data());
+                            let mut utx = UnverifiedTransaction::new();
                             utx.set_transaction(tx.clone());
                             let mut sign_data = sign_data.clone();
                             sign_data.extend(op.self_pk.clone().unwrap());
@@ -295,14 +335,17 @@ async fn chain_loop(
 
                             if let Ok(bytes_code) = utx.write_to_bytes() {
                                 let utx_str = encode(bytes_code);
+
                                 if let Ok(res) = hc.lock().await.send_signed_transaction(&utx_str) {
+                                    println!("sent tx get res {:?}", res);
                                     let hash = ChainOp::parse_json_hash(res);
                                     if !hash.is_empty() {
                                         // TODO: Send hash should before doing send_signed_transaction
+                                        op.checked_hashes.push_back(hash.clone());
                                         chain_to_main
                                             .send(ChainInfo::SignedHash(
                                                 nonce,
-                                                decode(hash).unwrap(),
+                                                remove_0x(&hash).to_string(),
                                             ))
                                             .await?;
                                         //fs::rename(op.file_name(nonce),op.file_name(&hash)).await;
@@ -310,11 +353,10 @@ async fn chain_loop(
                                 }
                             }
                         }
-                        op.saved_tx.remove(&id);
                     }
                     // timestamp should add,and check
-                    ToChainInfo::DelHash(hash) => {
-                        op.checked_hashes.push(hash);
+                    ToChainInfo::UndecideHash(hash) => {
+                        op.checked_hashes.push_back(hash);
                     }
                     ToChainInfo::Uri(uri) => {
                         println!("chain_loop uri {}", uri);
@@ -330,57 +372,101 @@ async fn chain_loop(
             }
             Ok(None) => {}
             Err(_) => {
-                // println!("chain_loop timeout");
-                if count % CHAIN_HEIGHT_TIMES == 0 {
-                    if let Ok(res) = hc.lock().await.get_block_number() {
-                        println!("chain loop get something {:?}", res);
-                        let h = ChainOp::parse_json_height(res);
-                        if h > 0 {
-                            chain_to_main.send(ChainInfo::Height(h)).await?;
+                println!(
+                    "chain_loop timeout  count {} tiem  {:?}",
+                    count,
+                    Instant::now(),
+                );
+                if count % CHAIN_HEIGHT_TIMES == 0 {}
+
+                if let Some(hash) = op.checked_hashes.pop_front() {
+                    if let Ok(res) = hc.lock().await.get_transaction(&hash) {
+                        if res.result().is_none() {
+                            op.checked_hashes.push_back(hash);
+                        } else {
+                            chain_to_main.send(ChainInfo::SuccHash(hash)).await?;
                         }
                     }
                 }
-
                 count += 1;
             }
         }
     }
 }
 
-async fn client_start(all_config: AllConfig) -> Result<()> {
-    let key_pair = KeyPair::new(Encryption::from_str("sm2").unwrap());
-    let stream = TcpStream::connect("127.0.0.1:18888").await?;
-  
-    let mut reader = BufReader::new(stream.clone());
-    let mut flag:usize = 0;
+async fn send_onchain_info(mut stream: TcpStream) -> Result<()> {
+    let mut flag: u64 = 0;
     loop {
-        println!("network client");
+        std::thread::sleep(std::time::Duration::new(3, 0));
+        let data_str = format!("{}{}", "test", flag);
+        let mut buff = flag.to_be_bytes().to_vec();
+        buff.extend(data_str.as_bytes());
+
+        let mut header = Header::default();
+        header.ptype = TYPE_RAW_DATA;
+        header.len = buff.len() as u32;
+        let buff = Payload::pack_head_and_payload(header, buff);
+        stream.write_all(&buff).await?;
+        flag += 1;
+    }
+}
+
+async fn client_start(all_config: AllConfig) -> Result<()> {
+    let sk = PrivateKey::from_str(
+        "6ff0a6e8cd3b19cfc17503a8cdf4b7fc5aafe63ab81749a32b7fb5555eb8771f",
+        Encryption::from_str("sm2").unwrap(),
+    )
+    .unwrap();
+    let key_pair = KeyPair::from_privkey(sk);
+
+    let mut stream = TcpStream::connect("127.0.0.1:18888").await?;
+    let mut reader = BufReader::new(stream.clone());
+    let mut sent_info: Vec<u8> = Vec::new();
+
+    task::spawn(send_onchain_info(stream.clone()));
+
+    loop {
         let mut head_buff = vec![0; 8];
         reader.read_exact(&mut head_buff).await?;
-        println!("client read_exact");
+
         let header = Header::parse(&head_buff);
         let mut body = vec![0; header.len as usize];
         reader.read_exact(&mut body).await?;
 
         if header.ptype == TYPE_CHIP_REQ {
-            let key_create:Vec<u8> = vec![0x80, 0x45, 0x00, 0x00, 0x00];
-            let get_data:Vec<u8> = vec![0x00, 0xC0, 0x00, 0x00, 0x40];
-            let sign:Vec<u8> = vec![0x80, 0x46, 0x00, 0x00, 0x20];
+            let key_create: Vec<u8> = vec![0x80, 0x45, 0x00, 0x00, 0x00];
+            let get_data: Vec<u8> = vec![0x00, 0xC0, 0x00, 0x00, 0x40];
+            let tobe_sign: Vec<u8> = vec![0x80, 0x46, 0x00, 0x00, 0x20];
             if &body[0..5] == &key_create[0..] {
-                flag = 1;
-                
+                println!("client to be key create {:?} ", header);
+                let data = Payload::pack_chip_data(ChipCommand::ChipReady, None);
+                let mut ack_header = header;
+                ack_header.ptype = TYPE_CHIP_RES;
+                ack_header.len = data.len() as u32;
+                let buf = Payload::pack_head_and_payload(ack_header, data);
+                stream.write_all(&buf).await?;
+                sent_info = key_pair.pubkey().to_vec();
+            } else if &body[0..5] == &tobe_sign[0..] {
+                println!("client to be sign header {:?} ", header);
+                let data = Payload::pack_chip_data(ChipCommand::ChipReady, None);
+                let mut ack_header = header;
+                ack_header.ptype = TYPE_CHIP_RES;
+                ack_header.len = data.len() as u32;
+                let buf = Payload::pack_head_and_payload(ack_header, data);
+                stream.write_all(&buf).await?;
+                let hash = H256::from_slice(&body[5..]);
+                let sig = sign(&key_pair.privkey(), &hash);
+                sent_info = sig.to_vec()[0..64].to_vec();
             } else if &body[0..5] == &get_data[0..] {
-
-            } if &body[0..5] == &sign[0..] {
-
+                println!("client to get data {:?} ", header);
+                let mut ack_header = header;
+                ack_header.ptype = TYPE_CHIP_RES;
+                ack_header.len = sent_info.clone().len() as u32;
+                let buf = Payload::pack_head_and_payload(ack_header, sent_info.clone());
+                stream.write_all(&buf).await?;
             }
         }
-        
     }
-    
-    
-
-    Ok(())
 }
 
 async fn server_start(all_config: AllConfig) -> Result<()> {
@@ -479,6 +565,6 @@ fn main() -> Result<()> {
     if !all_config.client_start {
         task::block_on(server_start(all_config))
     } else {
-        Ok(())
+        task::block_on(client_start(all_config))
     }
 }

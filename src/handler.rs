@@ -12,7 +12,7 @@ use crate::payload::Header;
 use async_std::net::TcpStream;
 use futures::{channel::mpsc, select, FutureExt, SinkExt};
 pub use libsm::sm3;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::convert::TryInto;
 use std::io::Read;
 use std::str::FromStr;
@@ -34,6 +34,7 @@ pub struct Iot {
     pub dev_file: String,
     pub used: bool,
     pub links: BTreeMap<usize, TcpStream>,
+    pub tobe_signed_datas: VecDeque<(u16, Vec<u8>)>,
     //pub states: BTreeMap<usize, bool>,
 }
 
@@ -49,12 +50,12 @@ impl Iot {
             dev_file: dev_file.to_string(),
             used: false,
             links: BTreeMap::new(),
-            //states: BTreeMap::new(),
+            tobe_signed_datas: VecDeque::new(),
         };
         tmp
     }
 
-    // pub fn get_state(&self, stream_id: usize) -> Option<bool> {
+    // pub fn get_tobe_signed(&self, stream_id: usize) -> Option<bool> {
     //     self.states.get(&stream_id).cloned()
     // }
 
@@ -66,6 +67,14 @@ impl Iot {
     // pub fn clean_state(&mut self, stream_id: usize) {
     //     self.states.remove(&stream_id);
     // }
+    pub fn remove_signed_data(&mut self, req_id: u16) {
+        if let Some(data) = self.tobe_signed_datas.pop_front() {
+            if data.0 == req_id {
+                return;
+            }
+        }
+        self.tobe_signed_datas.retain(|data| data.0 != req_id);
+    }
 
     pub fn get_tcp(&self, stream_id: usize) -> Option<&TcpStream> {
         self.links.get(&stream_id)
