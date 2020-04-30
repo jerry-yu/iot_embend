@@ -53,7 +53,7 @@ pub struct ChainOp {
     pub url: Option<String>,
     pub dir: String,
     pub saved_info: Vec<ToChainInfo>,
-    pub saved_tx: BTreeMap<u16, Transaction>,
+    pub saved_tx: VecDeque<(u16, Transaction)>,
     pub inc_id: u16,
     pub checked_hashes: VecDeque<String>,
     pub self_pk: Option<Vec<u8>>,
@@ -103,7 +103,7 @@ impl ChainOp {
         let mut state = sql_con
             .prepare("insert into txs(id,value,data,hash) values(?,?,?,null)")
             .unwrap();
-        println!("insert db id {}",id);
+        println!("insert db id {}", id);
         state.bind(1, id as i64).unwrap();
         state.bind(2, value as i64).unwrap();
         state.bind(3, data).unwrap();
@@ -115,7 +115,7 @@ impl ChainOp {
         let mut state = sql_con
             .prepare("update txs set hash = ? where id = ? and hash is null")
             .unwrap();
-        println!("update db id {} hash {}",id,hash);
+        println!("update db id {} hash {}", id, hash);
         state.bind(1, hash).unwrap();
         state.bind(2, id as i64).unwrap();
         let _ = state.next()?;
@@ -124,7 +124,7 @@ impl ChainOp {
 
     pub fn delete_data_with_hash(sql_con: &Connection, hash: &str) -> Result<()> {
         let mut state = sql_con.prepare("delete from txs where hash = ?").unwrap();
-        println!("delete db hash {}",hash);
+        println!("delete db hash {}", hash);
         state.bind(1, hash).unwrap();
         let _ = state.next()?;
         Ok(())
@@ -142,18 +142,29 @@ impl ChainOp {
     }
 
     pub fn save_tx(&mut self, idx: u16, tx: Transaction) {
-        self.saved_tx.insert(idx, tx);
+        self.saved_tx.push_back((idx, tx));
     }
 
     pub fn first_tx(&self) -> Option<(u16, Transaction)> {
-        if let Some((id, tx)) = self.saved_tx.iter().next() {
-            return Some((id.clone(), tx.clone()));
-        }
-        None
+        self.saved_tx.front().cloned()
     }
 
     pub fn remove_tx(&mut self, idx: u16) -> Option<Transaction> {
-        self.saved_tx.remove(&idx)
+        let fir_tx = self.saved_tx.front();
+        if fir_tx.is_some() && fir_tx.unwrap().0 == idx {
+            return Some(self.saved_tx.pop_front().unwrap().1);
+        } else {
+            let mut pos = 0;
+            for (p, (sid, _)) in self.saved_tx.iter().enumerate() {
+                if *sid == idx {
+                    pos = p
+                }
+            }
+            if pos > 0 {
+                return Some(self.saved_tx.remove(pos).unwrap().1);
+            }
+            None
+        }
     }
 
     pub fn tx_empty(&self) -> bool {

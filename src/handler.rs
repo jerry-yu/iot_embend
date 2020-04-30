@@ -67,13 +67,18 @@ impl Iot {
     // pub fn clean_state(&mut self, stream_id: usize) {
     //     self.states.remove(&stream_id);
     // }
+    pub fn get_first_tobe_signed_data(&self) -> Option<(u16, Vec<u8>)> {
+        self.tobe_signed_datas.front().cloned()
+    }
+
     pub fn remove_signed_data(&mut self, req_id: u16) {
         if let Some(data) = self.tobe_signed_datas.pop_front() {
             if data.0 == req_id {
                 return;
+            } else {
+                println!("first signed data not equal reqid {}", req_id);
             }
         }
-        self.tobe_signed_datas.retain(|data| data.0 != req_id);
     }
 
     pub fn get_tcp(&self, stream_id: usize) -> Option<&TcpStream> {

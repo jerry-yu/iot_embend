@@ -937,6 +937,7 @@ dependencies = [
  "futures 0.3.4",
  "lazy_static",
  "libsm",
+ "log",
  "rand 0.7.3",
  "serde",
  "sqlite",
