@@ -1,5 +1,6 @@
 use crate::handler::{sm3, Address, H256};
 use crate::Result;
+use async_std::sync::{Arc, Mutex};
 use cita_tool::{
     client::{
         basic::{Client, ClientExt},
@@ -10,7 +11,7 @@ use cita_tool::{
     rpctypes::{JsonRpcResponse, ParamsValue, ResponseValue},
     ProtoMessage,
 };
-use sqlite::{Connection, Statement};
+use rusqlite::{params, Connection, Statement, NO_PARAMS};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
@@ -68,65 +69,70 @@ impl ChainOp {
         op
     }
 
-    pub fn get_unhashed_data(sql_con: &Connection) -> Vec<RawChainData> {
-        let mut cursor = sql_con
-            .prepare("SELECT id,value,data FROM txs WHERE hash is null")
-            .unwrap()
-            .cursor();
+    pub async fn get_unhashed_data(sql_con: Arc<Mutex<Connection>>) -> Result<Vec<RawChainData>> {
+        let sql_con = sql_con.lock().await;
+        let mut stmt = sql_con.prepare("SELECT id,value,data FROM txs WHERE hash is null")?;
+        let mut rows = stmt.query(NO_PARAMS)?;
 
         let mut out = Vec::new();
-        while let Some(row) = cursor.next().unwrap() {
+        while let Some(row) = rows.next()? {
+            let nonce: i64 = row.get(0)?;
+            let value: i64 = row.get(1)?;
+            let data = row.get(2)?;
+
             out.push(RawChainData {
-                nonce: row[0].as_integer().unwrap() as u64,
-                value: row[1].as_integer().unwrap() as u64,
-                data: row[2].as_string().unwrap().to_string(),
+                nonce: nonce as u64,
+                value: value as u64,
+                data,
             });
         }
-        out
+        Ok(out)
     }
 
-    pub fn get_undeleted_hash(sql_con: &Connection) -> Vec<String> {
-        let mut cursor = sql_con
-            .prepare("SELECT hash FROM txs WHERE hash is not null")
-            .unwrap()
-            .cursor();
+    pub async fn get_undeleted_hash(sql_con: Arc<Mutex<Connection>>) -> Result<Vec<String>> {
+        let sql_con = sql_con.lock().await;
+        let mut stmt = sql_con.prepare("SELECT hash FROM txs WHERE hash is not null")?;
 
-        //cursor.bind(&[Value::Integer(50)]).unwrap();
+        let mut rows = stmt.query(NO_PARAMS)?;
+
         let mut out = Vec::new();
-        while let Some(row) = cursor.next().unwrap() {
-            out.push(row[0].as_string().unwrap().to_string());
+        while let Some(row) = rows.next()? {
+            out.push(row.get(0)?);
         }
-        out
+        Ok(out)
     }
 
-    pub fn insert_raw_data(sql_con: &Connection, id: u64, value: u64, data: &str) -> Result<()> {
-        let mut state = sql_con
-            .prepare("insert into txs(id,value,data,hash) values(?,?,?,null)")
-            .unwrap();
-        println!("insert db id {}", id);
-        state.bind(1, id as i64).unwrap();
-        state.bind(2, value as i64).unwrap();
-        state.bind(3, data).unwrap();
-        let _ = state.next()?;
+    pub async fn insert_raw_data(
+        sql_con: Arc<Mutex<Connection>>,
+        id: u64,
+        value: u64,
+        data: &str,
+    ) -> Result<()> {
+        sql_con.lock().await.execute(
+            "insert into txs(id,value,data,hash) values(?,?,?,null)",
+            params![id as i64, value as i64, data],
+        )?;
+
         Ok(())
     }
 
-    pub fn update_data_hash(sql_con: &Connection, id: u64, hash: &str) -> Result<()> {
-        let mut state = sql_con
-            .prepare("update txs set hash = ? where id = ? and hash is null")
-            .unwrap();
-        println!("update db id {} hash {}", id, hash);
-        state.bind(1, hash).unwrap();
-        state.bind(2, id as i64).unwrap();
-        let _ = state.next()?;
+    pub async fn update_data_hash(
+        sql_con: Arc<Mutex<Connection>>,
+        id: u64,
+        hash: &str,
+    ) -> Result<()> {
+        sql_con.lock().await.execute(
+            "update txs set hash = ? where id = ? and hash is null",
+            params![hash, id as i64],
+        )?;
         Ok(())
     }
 
-    pub fn delete_data_with_hash(sql_con: &Connection, hash: &str) -> Result<()> {
-        let mut state = sql_con.prepare("delete from txs where hash = ?").unwrap();
-        println!("delete db hash {}", hash);
-        state.bind(1, hash).unwrap();
-        let _ = state.next()?;
+    pub async fn delete_data_with_hash(sql_con: Arc<Mutex<Connection>>, hash: &str) -> Result<()> {
+        sql_con
+            .lock()
+            .await
+            .execute("delete from txs where hash = ?l", params![hash])?;
         Ok(())
     }
 

@@ -8,7 +8,7 @@ use cita_tool::{
 
 pub use cita_tool::H256;
 //pub use ethereum_types::{};
-use crate::payload::Header;
+use crate::payload::{ChipCommand, Header, Payload, TYPE_CHIP_REQ};
 use async_std::net::TcpStream;
 use futures::{channel::mpsc, select, FutureExt, SinkExt};
 pub use libsm::sm3;
@@ -126,6 +126,17 @@ impl Iot {
     pub async fn send_net_data(&mut self, id: usize, data: &[u8]) -> std::io::Result<()> {
         if let Some(tcp) = self.links.get_mut(&id) {
             tcp.write_all(data).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn send_sign_data(&mut self) -> std::io::Result<()> {
+        if let Some((req_id, hash)) = self.get_first_tobe_signed_data() {
+            let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash));
+            let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id, data.len() as u32);
+            buf.extend(data);
+            println!("send tobe sig hash req id {}", req_id);
+            self.send_any_net_data(&buf).await?;
         }
         Ok(())
     }

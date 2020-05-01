@@ -37,7 +37,7 @@ use payload::{
     ChipCommand, Header, Payload, TYPE_CHIP_REQ, TYPE_CHIP_RES, TYPE_RAW_DATA, TYPE_RAW_DATA_RES,
 };
 use rand::Rng;
-use sqlite::Connection;
+use rusqlite::{Connection, NO_PARAMS};
 use std::convert::TryInto;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -84,25 +84,15 @@ fn get_pk_from_file(dfile: String) -> Option<Vec<u8>> {
     None
 }
 
-async fn send_sign_data(iot: &mut Iot) {
-    if let Some((req_id, hash)) = iot.get_first_tobe_signed_data() {
-        let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash));
-        let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id, data.len() as u32);
-        buf.extend(data);
-        println!("send tobe sig hash req id {}", req_id);
-        let _ = iot.send_any_net_data(&buf).await;
-    }
-}
-
 async fn main_process(
     mut main_to_chain: mpsc::UnboundedSender<ToChainInfo>,
     mut main_from_chain: mpsc::UnboundedReceiver<ChainInfo>,
     mut main_from_net: mpsc::UnboundedReceiver<(usize, Header, Vec<u8>)>,
     mut main_from_listener: mpsc::UnboundedReceiver<(usize, TcpStream)>,
-    sql_con: Connection,
     config: AllConfig,
 ) -> Result<()> {
     let mut iot = Iot::new("", &config.dev_file);
+
     let pk = get_pk_from_file(config.dev_file);
     if let Some(pk) = pk {
         iot.self_pk = Some(pk.clone());
@@ -120,14 +110,20 @@ async fn main_process(
         .send(ToChainInfo::DstAccount(addr.unwrap()))
         .await?;
 
-    let to_be_sent_data = ChainOp::get_unhashed_data(&sql_con);
-    for data in to_be_sent_data {
-        main_to_chain.send(ToChainInfo::Data(data)).await?;
+    let sql_con = Connection::open("db")?;
+    sql_con.execute(TABLE_SQL, NO_PARAMS)?;
+    let sql_con = Arc::new(Mutex::new(sql_con));
+
+    if let Ok(to_be_sent_data) = ChainOp::get_unhashed_data(sql_con.clone()).await {
+        for data in to_be_sent_data {
+            main_to_chain.send(ToChainInfo::Data(data)).await?;
+        }
     }
 
-    let to_be_del_hash = ChainOp::get_undeleted_hash(&sql_con);
-    for hash in to_be_del_hash {
-        main_to_chain.send(ToChainInfo::UndecideHash(hash)).await?;
+    if let Ok(to_be_del_hash) = ChainOp::get_undeleted_hash(sql_con.clone()).await {
+        for hash in to_be_del_hash {
+            main_to_chain.send(ToChainInfo::UndecideHash(hash)).await?;
+        }
     }
 
     loop {
@@ -146,10 +142,10 @@ async fn main_process(
                             iot.tobe_signed_datas.push_back((req_id,hash));
                         }
                         ChainInfo::SignedHash(nonce,hash) => {
-                            ChainOp::update_data_hash(&sql_con,nonce,&hash);
+                            let _ = ChainOp::update_data_hash(sql_con.clone(),nonce,&hash).await;
                         }
                         ChainInfo::SuccHash(hash) => {
-                            ChainOp::delete_data_with_hash(&sql_con,&hash);
+                            let _ = ChainOp::delete_data_with_hash(sql_con.clone(),&hash).await;
                         }
                         _ => {}
                     }
@@ -164,7 +160,7 @@ async fn main_process(
 
                         let str_data = String::from_utf8(payload[8..].to_vec());
                         if let Ok(str_data) = str_data {
-                            let res = ChainOp::insert_raw_data(&sql_con,nonce,value,&str_data);
+                            let res = ChainOp::insert_raw_data(sql_con.clone(),nonce,value,&str_data).await;
                             if let Ok(_) = res {
                                 let buf = Payload::pack_head_data(TYPE_RAW_DATA_RES,header.id,0);
                                 iot.send_net_data(stream_id, &buf).await;
@@ -191,7 +187,7 @@ async fn main_process(
                             if header.id > 0 {
                                 iot.remove_signed_data(header.id);
                                 main_to_chain.send(ToChainInfo::Sign(header.id,payload)).await?;
-                                send_sign_data(&mut iot).await;
+                                iot.send_sign_data().await;
                             } else {
                                 main_to_chain.send(ToChainInfo::SelfPK(payload.clone())).await?;
                                 iot.self_pk = Some(payload.clone());
@@ -224,7 +220,7 @@ async fn main_process(
                                     .await?;
                                 fs.write_all(&dev_data).await?;
 
-                                send_sign_data(&mut iot).await;
+                                iot.send_sign_data().await;
                             }
                         }
 
@@ -243,14 +239,14 @@ async fn main_process(
                         hbuf.extend(data);
                         iot.send_net_data(stream_id, &hbuf).await;
                     } else {
-                        send_sign_data(&mut iot).await;
+                        iot.send_sign_data().await;
                     }
                 },
                 None => break,
             },
         }
     }
-
+    //drop(sql_con);
     Ok(())
 }
 
@@ -506,18 +502,16 @@ async fn server_start(all_config: AllConfig) -> Result<()> {
     let (chain_to_main, main_from_chain) = mpsc::unbounded();
     let (net_to_main, main_from_net) = mpsc::unbounded();
     let (mut listener_to_main, main_from_listener) = mpsc::unbounded();
-    let connection = sqlite::open("db").unwrap();
-    connection.execute(TABLE_SQL).unwrap();
 
-    let ctsk = task::spawn(chain_loop(chain_to_main.clone(), chain_from_main));
-    let ptsk = task::spawn(main_process(
+    task::spawn(main_process(
         main_to_chain,
         main_from_chain,
         main_from_net,
         main_from_listener,
-        connection,
         all_config,
     ));
+
+    let _ctsk = task::spawn(chain_loop(chain_to_main.clone(), chain_from_main));
 
     let mut incoming = listener.incoming();
     let mut stream_id: usize = 0;
@@ -527,8 +521,8 @@ async fn server_start(all_config: AllConfig) -> Result<()> {
         task::spawn(network_process(stream_id, stream, net_to_main.clone()));
         stream_id += 1;
     }
-    let _ = ptsk.await;
-    let _ = ctsk.await;
+    // let _ = ptsk.await;
+    // let _ = ctsk.await;
     Ok(())
 }
 
