@@ -14,7 +14,7 @@ futures = "0.3.4"
 rand = "0.7.3"
 toml = "0.5.6"
 serde = { version = "1.0", features = ["derive"] }
-rusqlite = {version = "0.23.1", features = ["bundled"]}
+rusqlite = {version = "0.22", features = ["bundled"]}
 clap = "2.33.0"
 log = "0.4.8"
 libsm = { git = "https://github.com/citahub/libsm", rev = "ac323abd3512a9fdb8bfd6cd349a6fc46deb688f" }
