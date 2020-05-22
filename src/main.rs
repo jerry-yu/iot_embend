@@ -32,7 +32,7 @@ use clap::{App, Arg};
 use config::{AllConfig, Config, DevAddr};
 use futures::{channel::mpsc, select, FutureExt, SinkExt};
 use handler::{sm3, Address, Iot, PK};
-use log::{info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use payload::{
     ChipCommand, Header, Payload, TYPE_CHIP_REQ, TYPE_CHIP_RES, TYPE_RAW_DATA, TYPE_RAW_DATA_RES,
 };
@@ -43,10 +43,9 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 const CHAIN_VIST_INTERVAL: u64 = 1;
-const CHAIN_HEIGHT_TIMES: u64 = 10;
+const CHAIN_HEIGHT_TIMES: u64 = 5;
 
-const WAL_DIR: &'static str = "./wal";
-const CONF_DIR: &'static str = "./conf";
+//const CONF_DIR: &'static str = "./conf";
 const FUNC_HASH: &'static str = "fc934fed";
 
 // lazy_static::lazy_static!{
@@ -58,16 +57,20 @@ async fn network_process(
     id: usize,
     net_reader: TcpStream,
     mut net_to_main: mpsc::UnboundedSender<(usize, Header, Vec<u8>)>,
-) -> io::Result<()> {
+) -> Result<()> {
     let mut reader = BufReader::new(net_reader.clone());
     loop {
-        let mut head_buff = vec![0; 8];
+        let mut head_buff = vec![0; 10];
         reader.read_exact(&mut head_buff).await?;
-        let header = Header::parse(&head_buff);
+        if !Header::is_flag_ok(&head_buff) {
+            warn!("Header's leader byte not 0xAA55");
+            continue;
+        }
+        let header = Header::parse(&head_buff[2..]);
         let mut body = vec![0; header.len as usize];
         reader.read_exact(&mut body).await?;
         trace!("net read data header {:?}", header);
-        net_to_main.send((id, header, body)).await;
+        net_to_main.send((id, header, body)).await?;
     }
 }
 
@@ -91,7 +94,7 @@ async fn main_process(
     mut main_from_listener: mpsc::UnboundedReceiver<(usize, TcpStream)>,
     config: AllConfig,
 ) -> Result<()> {
-    let mut iot = Iot::new("", &config.dev_file);
+    let mut iot = Iot::new(&config.dev_file);
 
     let pk = get_pk_from_file(config.dev_file);
     if let Some(pk) = pk {
@@ -132,14 +135,20 @@ async fn main_process(
                 Some(info) => {
                     match info {
                         ChainInfo::UnsignHash(req_id,hash) => {
-                            if iot.tobe_signed_datas.is_empty() && !iot.need_chip_pk() {
-                                let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash.clone()));
-                                let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id,data.len() as u32);
-                                buf.extend(data);
-                                println!("send tobe sig hash req id {}",req_id);
-                                let _ = iot.send_any_net_data(&buf).await;
+                            if !iot.need_chip_pk() {
+                                // Tobe signed id would never be 0
+                                let sid = iot.tobe_signed_datas.front().unwrap_or_default().0;
+                                if sid == 0 || sid == req_id  {
+                                    let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash.clone()));
+                                    let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id,data.len() as u32);
+                                    buf.extend(data);
+                                    debug!("send tobe sig hash req id {}",req_id);
+                                    let _ = iot.send_any_net_data(&buf).await;
+                                }
                             }
-                            iot.tobe_signed_datas.push_back((req_id,hash));
+                            if sid != req_id {
+                                iot.tobe_signed_datas.push_back((req_id,hash));
+                            }
                         }
                         ChainInfo::SignedHash(nonce,hash) => {
                             let _ = ChainOp::update_data_hash(sql_con.clone(),nonce,&hash).await;
@@ -153,7 +162,7 @@ async fn main_process(
                 None => break,
             },
             data = main_from_net.next().fuse() => match data {
-                Some((stream_id,header,payload)) => {
+                Some((stream_id,header,mut payload)) => {
                     if header.ptype == TYPE_RAW_DATA {
                         let nonce:u64 = rand::thread_rng().gen();
                         let value = u64::from_be_bytes(payload[0..8].try_into().unwrap());
@@ -164,68 +173,75 @@ async fn main_process(
                             if let Ok(_) = res {
                                 let buf = Payload::pack_head_data(TYPE_RAW_DATA_RES,header.id,0);
                                 iot.send_net_data(stream_id, &buf).await;
-                                println!("main recv sid {} header {:?} data {:?}",stream_id,header,str_data);
+                                info!("main recv sid {} header {:?} data {:?}",stream_id,header,str_data);
                                 main_to_chain.send(ToChainInfo::Data(RawChainData {
                                     nonce,
                                     value:value,
                                     data:str_data})).await?;
 
                             } else {
-                                // println!("inert data error {:?}",res.error());
+                                error!("inert data error {:?}",res.error());
                             }
                         }
                     } else if header.ptype == TYPE_CHIP_RES {
-                        if payload.len() == 0x02 && Payload::is_chip_ok(payload[0], payload[1]) {
-                            let data = {
-                                if header.id > 0 {Payload::pack_chip_data(ChipCommand::GetSignature,None)}
-                                else {Payload::pack_chip_data(ChipCommand::GetPK,None)}
-                            };
-                            let mut hbuf = Payload::pack_head_data(TYPE_CHIP_REQ, header.id, data.len() as u32);
-                            hbuf.extend(data);
-                            iot.send_net_data(stream_id, &hbuf).await;
-                        } else if payload.len() == 0x40 {
-                            if header.id > 0 {
-                                iot.remove_signed_data(header.id);
-                                main_to_chain.send(ToChainInfo::Sign(header.id,payload)).await?;
-                                iot.send_sign_data().await;
-                            } else {
-                                main_to_chain.send(ToChainInfo::SelfPK(payload.clone())).await?;
-                                iot.self_pk = Some(payload.clone());
-
-                                //send to be signed data
-                                if let Some((req_id,data)) = iot.tobe_signed_datas.front() {
-                                    let data = Payload::pack_chip_data(ChipCommand::Signature, Some(data.clone()));
-                                    let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, *req_id,data.len() as u32);
-                                    buf.extend(data);
-                                    println!("send tobe sig hash req id {},when pk gotten",req_id);
-                                    let _ = iot.send_any_net_data(&buf).await;
-                                }
-
-                                let hash = sm3::hash::Sm3Hash::new(&payload).get_hash();
-                                // let mut hash: [u8]= [0;32];
-                                // payload.sm3_crypt_hash_into(&mut hash);
-                                let addr = Address::from(H256::from(hash));
-
-                                let dev = DevAddr {
-                                    dev_addr: format!("0x{}",encode(addr)),
-                                    dev_pk: format!("0x{}",encode(payload)),
+                        let len = payload.len();
+                        if len == 0x02 {
+                            if Payload::is_chip_ok(payload[0], payload[1]) {
+                                let data = {
+                                    if header.id > 0 {Payload::pack_chip_data(ChipCommand::GetSignature,None)}
+                                    else {Payload::pack_chip_data(ChipCommand::GetPK,None)}
                                 };
-
-                                let dev_data = toml::to_vec(&dev).unwrap();
-                                let mut fs =  fs::OpenOptions::new()
-                                    .write(true)
-                                    .create(true)
-                                    .truncate(true)
-                                    .open(iot.dev_file.clone())
-                                    .await?;
-                                fs.write_all(&dev_data).await?;
-
-                                iot.send_sign_data().await;
+                                let mut hbuf = Payload::pack_head_data(TYPE_CHIP_REQ, header.id, data.len() as u32);
+                                hbuf.extend(data);
+                                iot.send_net_data(stream_id, &hbuf).await;
+                            } else {
+                                error!("chip return error respone {:x}{:x}, expect 0x6140",payload[0], payload[1]);
                             }
+                        } else if len == 0x42  {
+                            if Payload::is_status_ok(payload[0x40],payload[0x41]) {
+                               payload.resize(0x40,0);
+                                if header.id > 0 {
+                                    iot.remove_signed_data(header.id);
+                                    main_to_chain.send(ToChainInfo::Sign(header.id,payload)).await?;
+                                    iot.send_sign_data().await;
+                                } else {
+                                    main_to_chain.send(ToChainInfo::SelfPK(payload.clone())).await?;
+                                    iot.self_pk = Some(payload.clone());
+                                    //send to be signed data
+                                    if let Some((req_id,data)) = iot.tobe_signed_datas.front() {
+                                        let data = Payload::pack_chip_data(ChipCommand::Signature, Some(data.clone()));
+                                        let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, *req_id,data.len() as u32);
+                                        buf.extend(data);
+                                        info!("send tobe sig hash req id {},when pk gotten",req_id);
+                                        let _ = iot.send_any_net_data(&buf).await;
+                                    }
+                                    let hash = sm3::hash::Sm3Hash::new(&payload).get_hash();
+                                    // let mut hash: [u8]= [0;32];
+                                    // payload.sm3_crypt_hash_into(&mut hash);
+                                    let addr = Address::from(H256::from(hash));
+                                    let dev = DevAddr {
+                                        dev_addr: format!("0x{}",encode(addr)),
+                                        dev_pk: format!("0x{}",encode(payload)),
+                                    };
+                                    let dev_data = toml::to_vec(&dev).unwrap();
+                                    let mut fs =  fs::OpenOptions::new()
+                                        .write(true)
+                                        .create(true)
+                                        .truncate(true)
+                                        .open(iot.dev_file.clone())
+                                        .await?;
+                                    fs.write_all(&dev_data).await?;
+                                    iot.send_sign_data().await;
+                                }
+                            } else {
+                                error!("chip return error status {:x}{:x} expect 0x9000",payload[0x40], payload[0x41]);
+                            }
+                        } else {
+                            warn!("Unkown payload len {} data {:#?}",len,payload);
                         }
 
                     } else {
-                        println!("recive unkown header type {:?}",header);
+                        warn!("recive unkown header type {:?}",header);
                     }
                 },
                 None=> break,
@@ -234,7 +250,7 @@ async fn main_process(
                 Some((stream_id,tcp)) => {
                     let _ = iot.links.insert(stream_id, tcp);
                     if iot.need_chip_pk() {
-                        let data =Payload::pack_chip_data(ChipCommand::CreateKeyPair,None);
+                        let data = Payload::pack_chip_data(ChipCommand::CreateKeyPair,None);
                         let mut hbuf = Payload::pack_head_data(TYPE_CHIP_REQ, 0, data.len() as u32);
                         hbuf.extend(data);
                         iot.send_net_data(stream_id, &hbuf).await;
@@ -246,7 +262,6 @@ async fn main_process(
             },
         }
     }
-    //drop(sql_con);
     Ok(())
 }
 
@@ -257,7 +272,7 @@ async fn chain_loop(
     let tval = Duration::new(CHAIN_VIST_INTERVAL, 0);
     let hc = Mutex::new(Client::new());
     let mut count: u64 = 0;
-    let mut op = ChainOp::new(WAL_DIR);
+    let mut op = ChainOp::new();
     loop {
         match future::timeout(tval, chain_from_main.next()).await {
             Ok(Some(data)) => {
@@ -269,7 +284,7 @@ async fn chain_loop(
                             true,
                         );
 
-                        println!("get raw data id {:?},", raw_data.value);
+                        info!("get raw data id {:?},", raw_data.value);
 
                         if let Ok(code_str) = code_str {
                             let account_str = format!("{:x}", op.dst_account.unwrap());
@@ -297,18 +312,19 @@ async fn chain_loop(
                                 .set_current_height(h)
                                 .set_code(&code)
                                 .set_address(&account_str);
-                            println!(
+                            info!(
                                 "encode_params  account {:?} nonce {:?}",
                                 account_str, nonce_str
                             );
-                            if let Ok(mut tx) = hc.lock().await.generate_transaction(tx_opt) {
+                            let res = hc.lock().await.generate_transaction(tx_opt);
+                            if let Ok(mut tx) = res {
                                 // Use input random number as nonce
-                                // println!(
+                                // info!(
                                 //     "chain raw data gen nonce {:?} data {:x?}",
                                 //     nonce_str,
                                 //     tx.get_data()
                                 // );
-                                println!("generate_transaction ok");
+                                info!("generate_transaction ok");
                                 tx.set_nonce(nonce_str);
                                 if op.tx_empty() {
                                     if let Some(hash) = op.chain_to_sign_data(&tx) {
@@ -323,10 +339,10 @@ async fn chain_loop(
                                     op.save_tx(id, tx);
                                 }
                             } else {
-                                println!("generate transaction error");
+                                warn!("generate transaction error {:?}", res);
                             }
                         } else {
-                            println!("encode param error");
+                            warn!("encode param error");
                         }
                     }
                     ToChainInfo::SelfPK(pk) => {
@@ -341,7 +357,7 @@ async fn chain_loop(
                             }
                             let nstr = tx.get_nonce();
                             let nonce = u64::from_str_radix(nstr, 16).unwrap();
-                            println!("get nonce {:?} data {:x?}", nonce, tx.get_data());
+                            info!("get nonce {:?} data {:x?}", nonce, tx.get_data());
                             let mut utx = UnverifiedTransaction::new();
                             utx.set_transaction(tx.clone());
                             let mut sign_data = sign_data.clone();
@@ -352,7 +368,7 @@ async fn chain_loop(
                                 let utx_str = encode(bytes_code);
 
                                 if let Ok(res) = hc.lock().await.send_signed_transaction(&utx_str) {
-                                    println!("sent tx get res {:?}", res);
+                                    info!("sent tx get res {:?}", res);
                                     let hash = ChainOp::parse_json_hash(res);
                                     if !hash.is_empty() {
                                         // TODO: Send hash should before doing send_signed_transaction
@@ -374,12 +390,12 @@ async fn chain_loop(
                         op.checked_hashes.push_back(hash);
                     }
                     ToChainInfo::Uri(uri) => {
-                        println!("chain_loop uri {}", uri);
+                        info!("chain_loop uri {}", uri);
                         let tmp_hc = hc.lock().await.clone();
                         *hc.lock().await = tmp_hc.set_uri(&uri);
                     }
                     ToChainInfo::DstAccount(addr) => {
-                        println!("chain_loop dst  {}", addr);
+                        info!("chain_loop dst  {}", addr);
                         op.dst_account = Some(addr);
                     }
                     _ => {}
@@ -387,12 +403,19 @@ async fn chain_loop(
             }
             Ok(None) => {}
             Err(_) => {
-                println!(
+                debug!(
                     "chain_loop timeout  count {} tiem  {:?}",
                     count,
                     Instant::now(),
                 );
-                // if count % CHAIN_HEIGHT_TIMES == 0 {}
+                // If not Recieve message from main,resend message
+                if count % CHAIN_HEIGHT_TIMES == 4 {
+                    if let Some((id, tx)) = op.first_tx() {
+                        if let Some(buf) = op.chain_to_sign_data(&tx) {
+                            chain_to_main.send(ChainInfo::UnsignHash(id, buf)).await?;
+                        }
+                    }
+                }
 
                 if let Some(hash) = op.checked_hashes.pop_front() {
                     if let Ok(res) = hc.lock().await.get_transaction(&hash) {
@@ -422,7 +445,7 @@ async fn send_onchain_info(mut stream: TcpStream) -> Result<()> {
             flag, flag
         );
 
-        //println!("----------- {}",data_str);
+        //info!("----------- {}",data_str);
         let mut buff = flag.to_be_bytes().to_vec();
         buff.extend(data_str.as_bytes());
 
@@ -451,10 +474,13 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
     task::spawn(send_onchain_info(stream.clone()));
 
     loop {
-        let mut head_buff = vec![0; 8];
+        let mut head_buff = vec![0; 10];
         reader.read_exact(&mut head_buff).await?;
+        if !Header::is_flag_ok(&head_buff) {
+            continue;
+        }
 
-        let header = Header::parse(&head_buff);
+        let header = Header::parse(&head_buff[2..]);
         let mut body = vec![0; header.len as usize];
         reader.read_exact(&mut body).await?;
 
@@ -463,7 +489,7 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
             let get_data: Vec<u8> = vec![0x00, 0xC0, 0x00, 0x00, 0x40];
             let tobe_sign: Vec<u8> = vec![0x80, 0x46, 0x00, 0x00, 0x20];
             if &body[0..5] == &key_create[0..] {
-                println!("client to be key create {:?} ", header);
+                info!("client to be key create {:?} ", header);
                 let data = Payload::pack_chip_data(ChipCommand::ChipReady, None);
                 let mut ack_header = header;
                 ack_header.ptype = TYPE_CHIP_RES;
@@ -471,8 +497,10 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
                 let buf = Payload::pack_head_and_payload(ack_header, data);
                 stream.write_all(&buf).await?;
                 sent_info = key_pair.pubkey().to_vec();
+                sent_info.push(0x90);
+                sent_info.push(0x00);
             } else if &body[0..5] == &tobe_sign[0..] {
-                println!("client to be sign header {:?} ", header);
+                info!("client to be sign header {:?} ", header);
                 let data = Payload::pack_chip_data(ChipCommand::ChipReady, None);
                 let mut ack_header = header;
                 ack_header.ptype = TYPE_CHIP_RES;
@@ -482,8 +510,10 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
                 let hash = H256::from(&body[5..]);
                 let sig = sign(&key_pair.privkey(), &hash);
                 sent_info = sig.to_vec()[0..64].to_vec();
+                sent_info.push(0x90);
+                sent_info.push(0x00);
             } else if &body[0..5] == &get_data[0..] {
-                println!("client to get data {:?} ", header);
+                info!("client to get data {:?} ", header);
                 let mut ack_header = header;
                 ack_header.ptype = TYPE_CHIP_RES;
                 ack_header.len = sent_info.clone().len() as u32;
@@ -496,14 +526,14 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
 
 async fn server_start(all_config: AllConfig) -> Result<()> {
     let listener = TcpListener::bind("0.0.0.0:18888").await?;
-    println!("Listening on {}", listener.local_addr()?);
+    info!("Listening on {}", listener.local_addr()?);
 
     let (main_to_chain, chain_from_main) = mpsc::unbounded();
     let (chain_to_main, main_from_chain) = mpsc::unbounded();
     let (net_to_main, main_from_net) = mpsc::unbounded();
     let (mut listener_to_main, main_from_listener) = mpsc::unbounded();
 
-    task::spawn(main_process(
+    let ptsk = task::spawn(main_process(
         main_to_chain,
         main_from_chain,
         main_from_net,
@@ -511,22 +541,24 @@ async fn server_start(all_config: AllConfig) -> Result<()> {
         all_config,
     ));
 
-    let _ctsk = task::spawn(chain_loop(chain_to_main.clone(), chain_from_main));
+    let ctsk = task::spawn(chain_loop(chain_to_main.clone(), chain_from_main));
 
     let mut incoming = listener.incoming();
     let mut stream_id: usize = 0;
     while let Some(stream) = incoming.next().await {
         let stream = stream?;
-        listener_to_main.send((stream_id, stream.clone())).await;
+        listener_to_main.send((stream_id, stream.clone())).await?;
         task::spawn(network_process(stream_id, stream, net_to_main.clone()));
         stream_id += 1;
     }
-    // let _ = ptsk.await;
-    // let _ = ctsk.await;
+    let _ = ptsk.await;
+    let _ = ctsk.await;
     Ok(())
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let all_config = {
         let mut all_config = AllConfig::default();
         let matches = App::new("IoT")
@@ -566,13 +598,13 @@ fn main() -> Result<()> {
         all_config.dev_file = dev_config.to_string();
         if !all_config.client_start {
             let conf = loop {
-                //println!("file current {:?} file {:?}",std::fs::canonicalize("."),conf_file);
+                //info!("file current {:?} file {:?}",std::fs::canonicalize("."),conf_file);
                 let fc = std::fs::read_to_string(conf_file);
                 if fc.is_err() {
                     std::thread::sleep(std::time::Duration::new(2, 0));
                     continue;
                 }
-                // println!("file content fc {:?}",fc);
+                // info!("file content fc {:?}",fc);
                 if let Ok(config) = toml::from_str::<Config>(&fc.unwrap()) {
                     if !config.url.is_empty() && !config.account.is_empty() {
                         break config;

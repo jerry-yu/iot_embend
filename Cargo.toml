@@ -17,5 +17,6 @@ serde = { version = "1.0", features = ["derive"] }
 rusqlite = {version = "0.22", features = ["bundled"]}
 clap = "2.33.0"
 log = "0.4.8"
+env_logger = "0.7.1"
 libsm = { git = "https://github.com/citahub/libsm", rev = "ac323abd3512a9fdb8bfd6cd349a6fc46deb688f" }
 cita-tool = { git = "https://github.com/citahub/cita-cli", branch = "master"}

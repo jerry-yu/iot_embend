@@ -55,6 +55,10 @@ impl Payload {
     pub fn is_chip_ok(fb: u8, sb: u8) -> bool {
         fb == 0x61 && sb == 0x40
     }
+
+    pub fn is_status_ok(fb: u8, sb: u8) -> bool {
+        fb == 0x90 && sb == 0x00
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -66,6 +70,9 @@ pub struct Header {
 }
 
 impl Header {
+    pub fn is_flag_ok(data: &[u8]) -> bool {
+        data[0] == 0xaa && data[1] == 0x55
+    }
     pub fn parse(data: &[u8]) -> Self {
         assert_eq!(data.len(), 8);
         Header {
@@ -77,7 +84,7 @@ impl Header {
     }
 
     pub fn to_vec(&self) -> Vec<u8> {
-        let mut data = Vec::new();
+        let mut data = vec![0xaa, 0x55];
         data.extend_from_slice(&self.len.to_be_bytes());
         data.extend_from_slice(&self.id.to_be_bytes());
         data.push(self.ptype);

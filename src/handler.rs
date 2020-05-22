@@ -5,6 +5,7 @@ use cita_tool::{
     protos::blockchain::{Transaction, UnverifiedTransaction},
     H160, H512,
 };
+use log::{info, warn};
 
 pub use cita_tool::H256;
 //pub use ethereum_types::{};
@@ -24,9 +25,9 @@ use std::sync::{
 pub type Address = H160;
 pub type PK = H512;
 
-const URL_FILE: &'static str = "url";
-const ACCOUNT_FILE: &'static str = "dst_account";
-const SELF_ACCOUNT_FILE: &'static str = "my_account";
+// const URL_FILE: &'static str = "url";
+// const ACCOUNT_FILE: &'static str = "dst_account";
+// const SELF_ACCOUNT_FILE: &'static str = "my_account";
 
 #[derive(Clone)]
 pub struct Iot {
@@ -39,20 +40,19 @@ pub struct Iot {
 }
 
 impl Iot {
-    pub fn new(_conf_file: &str, dev_file: &str) -> Self {
+    pub fn new(dev_file: &str) -> Self {
         // std::fs::DirBuilder::new()
         //     .recursive(true)
         //     .create(dir)
         //     .unwrap();
 
-        let mut tmp = Iot {
+        Iot {
             self_pk: None,
             dev_file: dev_file.to_string(),
             used: false,
             links: BTreeMap::new(),
             tobe_signed_datas: VecDeque::new(),
-        };
-        tmp
+        }
     }
 
     // pub fn get_tobe_signed(&self, stream_id: usize) -> Option<bool> {
@@ -76,12 +76,12 @@ impl Iot {
             if data.0 == req_id {
                 return;
             } else {
-                println!("first signed data not equal reqid {}", req_id);
+                info!("first signed data not equal reqid {}", req_id);
             }
         }
     }
 
-    pub fn get_tcp(&self, stream_id: usize) -> Option<&TcpStream> {
+    fn get_tcp(&self, stream_id: usize) -> Option<&TcpStream> {
         self.links.get(&stream_id)
     }
 
@@ -135,7 +135,7 @@ impl Iot {
             let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash));
             let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id, data.len() as u32);
             buf.extend(data);
-            println!("send tobe sig hash req id {}", req_id);
+            info!("send tobe sig hash req id {}", req_id);
             self.send_any_net_data(&buf).await?;
         }
         Ok(())
@@ -153,7 +153,7 @@ impl Iot {
     }
 
     pub fn proc_body(&mut self, id: usize, hder: Header, body: &[u8]) -> Option<Vec<u8>> {
-        println!("iot proc body headerf {:?}", hder);
+        info!("iot proc body headerf {:?}", hder);
         // match hder.ptype {
         //     TYPE_PK_RES => {
         //         let hash = sm3::hash::Sm3Hash::new(body).get_hash();
@@ -188,7 +188,7 @@ impl Iot {
         //     }
 
         //     _ => {
-        //         println!("get data unused type, header {:?}",hder);
+        //         info!("get data unused type, header {:?}",hder);
         //     }
         // }
 

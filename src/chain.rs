@@ -52,7 +52,6 @@ pub enum ToChainInfo {
 pub struct ChainOp {
     pub dst_account: Option<Address>,
     pub url: Option<String>,
-    pub dir: String,
     pub saved_info: Vec<ToChainInfo>,
     pub saved_tx: VecDeque<(u16, Transaction)>,
     pub inc_id: u16,
@@ -62,9 +61,8 @@ pub struct ChainOp {
 }
 
 impl ChainOp {
-    pub fn new(dir: &str) -> Self {
+    pub fn new() -> Self {
         let mut op = ChainOp::default();
-        op.dir = dir.to_string();
         op.inc_id = 1;
         op
     }
