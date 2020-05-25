@@ -71,7 +71,7 @@ pub struct Header {
 
 impl Header {
     pub fn is_flag_ok(data: &[u8]) -> bool {
-        data[0] == 0xaa && data[1] == 0x55
+        data[0] == 0x55 && data[1] == 0xaa
     }
     pub fn parse(data: &[u8]) -> Self {
         assert_eq!(data.len(), 8);
@@ -84,7 +84,7 @@ impl Header {
     }
 
     pub fn to_vec(&self) -> Vec<u8> {
-        let mut data = vec![0xaa, 0x55];
+        let mut data = vec![0x55, 0xaa];
         data.extend_from_slice(&self.len.to_be_bytes());
         data.extend_from_slice(&self.id.to_be_bytes());
         data.push(self.ptype);
