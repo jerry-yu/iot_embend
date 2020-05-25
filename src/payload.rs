@@ -3,7 +3,7 @@ use std::convert::TryInto;
 pub const TYPE_CHIP_REQ: u8 = 1;
 pub const TYPE_CHIP_RES: u8 = 2;
 pub const TYPE_RAW_DATA: u8 = 3;
-pub const TYPE_RAW_DATA_RES: u8 = 3;
+pub const TYPE_RAW_DATA_RES: u8 = 4;
 
 pub enum ChipCommand {
     Select,

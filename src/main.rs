@@ -63,13 +63,13 @@ async fn network_process(
         let mut head_buff = vec![0; 10];
         reader.read_exact(&mut head_buff).await?;
         if !Header::is_flag_ok(&head_buff) {
-            warn!("Header's leader byte not 0xAA55");
+            warn!("Header's leader byte not 0x55AA");
             continue;
         }
         let header = Header::parse(&head_buff[2..]);
         let mut body = vec![0; header.len as usize];
         reader.read_exact(&mut body).await?;
-        trace!("net read data header {:?}", header);
+        trace!("net read data header {:?},body {:x?}", header, body);
         net_to_main.send((id, header, body)).await?;
     }
 }
@@ -135,9 +135,9 @@ async fn main_process(
                 Some(info) => {
                     match info {
                         ChainInfo::UnsignHash(req_id,hash) => {
+                            let sid = iot.tobe_signed_datas.front().unwrap_or(&(0,vec!())).0;
                             if !iot.need_chip_pk() {
                                 // Tobe signed id would never be 0
-                                let sid = iot.tobe_signed_datas.front().unwrap_or_default().0;
                                 if sid == 0 || sid == req_id  {
                                     let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash.clone()));
                                     let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id,data.len() as u32);
@@ -180,7 +180,7 @@ async fn main_process(
                                     data:str_data})).await?;
 
                             } else {
-                                error!("inert data error {:?}",res.error());
+                                error!("inert data error {:?}",res);
                             }
                         }
                     } else if header.ptype == TYPE_CHIP_RES {
@@ -249,7 +249,10 @@ async fn main_process(
             tcp = main_from_listener.next().fuse() => match tcp {
                 Some((stream_id,tcp)) => {
                     let _ = iot.links.insert(stream_id, tcp);
-                    if iot.need_chip_pk() {
+                    let flag = iot.need_chip_pk();
+                    trace!("Incoming stream id {} need pk {}",stream_id,flag);
+                    //trace!("saved linkes: {:?}", iot.links);
+                    if flag {
                         let data = Payload::pack_chip_data(ChipCommand::CreateKeyPair,None);
                         let mut hbuf = Payload::pack_head_data(TYPE_CHIP_REQ, 0, data.len() as u32);
                         hbuf.extend(data);
@@ -276,6 +279,7 @@ async fn chain_loop(
     loop {
         match future::timeout(tval, chain_from_main.next()).await {
             Ok(Some(data)) => {
+                count = 0;
                 match data {
                     ToChainInfo::Data(raw_data) => {
                         let code_str = encode_params(

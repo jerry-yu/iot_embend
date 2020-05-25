@@ -5,7 +5,7 @@ use cita_tool::{
     protos::blockchain::{Transaction, UnverifiedTransaction},
     H160, H512,
 };
-use log::{info, warn};
+use log::{info, trace};
 
 pub use cita_tool::H256;
 //pub use ethereum_types::{};
@@ -81,50 +81,14 @@ impl Iot {
         }
     }
 
-    fn get_tcp(&self, stream_id: usize) -> Option<&TcpStream> {
-        self.links.get(&stream_id)
-    }
-
-    // fn load_file(&mut self, dir: &str, conf_dir: &str) {
-    //     let url_file = conf_dir.to_string() + "/" + URL_FILE;
-    //     let dst_account_file = conf_dir.to_string() + "/" + ACCOUNT_FILE;
-    //     let my_account_file = conf_dir.to_string() + "/" + SELF_ACCOUNT_FILE;
-    //     if let Ok(mut fs) = std::fs::File::open(url_file) {
-    //         let mut buf = String::new();
-    //         if let Ok(_) = fs.read_to_string(&mut buf) {
-    //             self.rpc_url = Some(buf);
-    //         }
-    //     }
-    //     if let Ok(mut fs) = std::fs::File::open(dst_account_file) {
-    //         let mut buf = String::new();
-    //         if let Ok(_) = fs.read_to_string(&mut buf) {
-    //             self.dst_account = Address::from_str(&buf).ok();
-    //         }
-    //     }
-    //     if let Ok(mut fs) = std::fs::File::open(my_account_file) {
-    //         let mut buf = String::new();
-    //         if let Ok(_) = fs.read_to_string(&mut buf) {
-    //             self.my_account = Address::from_str(&buf).ok();
-    //         }
-    //     }
-    // }
-
     pub fn need_chip_pk(&self) -> bool {
-        if self.self_pk.is_none() {
-            return true;
-        }
-        false
+        self.self_pk.is_none()
     }
-
-    // pub async fn send_chip_req(&mut self, id: usize) -> std::io::Result<()> {
-    //     let mut header = Header::default();
-    //     header.id = id as u16;
-    //     header.len = 0;
-    //     Ok(())
-    // }
 
     pub async fn send_net_data(&mut self, id: usize, data: &[u8]) -> std::io::Result<()> {
+        //trace!("saved linkes: {:?}", self.links);
         if let Some(tcp) = self.links.get_mut(&id) {
+            trace!("send net data single idx:{} data: {:x?}", id, data);
             tcp.write_all(data).await?;
         }
         Ok(())
@@ -144,55 +108,12 @@ impl Iot {
     pub async fn send_any_net_data(&mut self, data: &[u8]) -> std::io::Result<usize> {
         let mut res = Err(std::io::ErrorKind::NotFound.into());
         for (idx, tcp) in &mut self.links {
+            trace!("send net data idx:{} data: {:x?}", idx, data);
             res = tcp.write_all(data).await;
             if res.is_ok() {
                 return Ok(*idx);
             }
         }
         Err(res.unwrap_err())
-    }
-
-    pub fn proc_body(&mut self, id: usize, hder: Header, body: &[u8]) -> Option<Vec<u8>> {
-        info!("iot proc body headerf {:?}", hder);
-        // match hder.ptype {
-        //     TYPE_PK_RES => {
-        //         let hash = sm3::hash::Sm3Hash::new(body).get_hash();
-        //         self.my_account = Some(Address::from_slice(&hash));
-
-        //         {
-        //             let mut ack_head = Header::default();
-        //             // just use this;non sense
-        //             ack_head.id = id as u16;
-        //             ack_head.ptype = 0xff;
-        //             let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
-        //             ack_head.len = abytes.len() as u32;
-        //             let mut data = ack_head.to_vec();
-        //             data.append(&mut abytes);
-        //             return Some(data);
-        //         }
-        //     }
-        //     TYPE_OP_PK_REQ => {
-        //         let mut ack_head = hder;
-        //         ack_head.ptype = 0xff;
-
-        //         if self.my_account.is_some() {
-        //             let mut abytes = self.my_account.unwrap().as_bytes().to_vec();
-        //             ack_head.len = abytes.len() as u32;
-        //             let mut data = ack_head.to_vec();
-        //             data.append(&mut abytes);
-        //             return Some(data);
-        //         } else {
-        //             ack_head.len = 0;
-        //             return Some(ack_head.to_vec());
-        //         }
-        //     }
-
-        //     _ => {
-        //         info!("get data unused type, header {:?}",hder);
-        //     }
-        // }
-
-        None
-        //Some("hello".as_bytes().into())
     }
 }
