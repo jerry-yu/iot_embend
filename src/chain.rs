@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS txs(
     data TEXT NOT NULL,
     hash TEXT default NULL);";
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct RawChainData {
     pub nonce: u64,
     pub value: u64,
@@ -38,7 +38,7 @@ pub enum ChainInfo {
     SignedHash(u64, String),
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ToChainInfo {
     Data(RawChainData),
     UndecideHash(String),

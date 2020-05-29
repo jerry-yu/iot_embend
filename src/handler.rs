@@ -86,7 +86,6 @@ impl Iot {
     }
 
     pub async fn send_net_data(&mut self, id: usize, data: &[u8]) -> std::io::Result<()> {
-        //trace!("saved linkes: {:?}", self.links);
         if let Some(tcp) = self.links.get_mut(&id) {
             trace!("send net data single idx:{} data: {:x?}", id, data);
             tcp.write_all(data).await?;
@@ -99,10 +98,14 @@ impl Iot {
             let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash));
             let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id, data.len() as u32);
             buf.extend(data);
-            info!("send tobe sig hash req id {}", req_id);
+            trace!("send tobe sig hash req id {}", req_id);
             self.send_any_net_data(&buf).await?;
         }
         Ok(())
+    }
+
+    pub async fn remove_stream_by_id(&mut self, stream_id: usize) {
+        self.links.remove(&stream_id);
     }
 
     pub async fn send_any_net_data(&mut self, data: &[u8]) -> std::io::Result<usize> {

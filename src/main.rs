@@ -71,6 +71,7 @@ async fn network_process(
         reader.read_exact(&mut body).await?;
         trace!("net read data header {:?},body {:x?}", header, body);
         net_to_main.send((id, header, body)).await?;
+        trace!("net read data send ok");
     }
 }
 
@@ -164,16 +165,15 @@ async fn main_process(
             data = main_from_net.next().fuse() => match data {
                 Some((stream_id,header,mut payload)) => {
                     if header.ptype == TYPE_RAW_DATA {
-                        let nonce:u64 = rand::thread_rng().gen();
-                        let value = u64::from_be_bytes(payload[0..8].try_into().unwrap());
-
-                        let str_data = String::from_utf8(payload[8..].to_vec());
-                        if let Ok(str_data) = str_data {
+                        if header.len > 8 {
+                            let nonce:u64 = rand::thread_rng().gen();
+                            let value = u64::from_be_bytes(payload[0..8].try_into().unwrap());
+                            let str_data = String::from_utf8_lossy(&payload[8..].to_vec()).into_owned();
                             let res = ChainOp::insert_raw_data(sql_con.clone(),nonce,value,&str_data).await;
                             if let Ok(_) = res {
                                 let buf = Payload::pack_head_data(TYPE_RAW_DATA_RES,header.id,0);
                                 iot.send_net_data(stream_id, &buf).await;
-                                info!("main recv sid {} header {:?} data {:?}",stream_id,header,str_data);
+                                info!("main recv sid {} header {:?} data {:x?}",stream_id,header,str_data);
                                 main_to_chain.send(ToChainInfo::Data(RawChainData {
                                     nonce,
                                     value:value,
@@ -182,6 +182,8 @@ async fn main_process(
                             } else {
                                 error!("inert data error {:?}",res);
                             }
+                        } else {
+                            warn!("recv raw data len {:?}",header.len);
                         }
                     } else if header.ptype == TYPE_CHIP_RES {
                         let len = payload.len();
@@ -297,18 +299,22 @@ async fn chain_loop(
                             code = code + &code_str;
 
                             let mut h = None;
-
                             if op.chain_height.is_some()
                                 && Instant::now().duration_since(op.chain_height.unwrap().0)
                                     < Duration::new(200, 0)
                             {
                                 h = Some(op.chain_height.unwrap().1)
                             } else {
-                                if let Ok(res) = hc.lock().await.get_block_number() {
+                                let res = hc.lock().await.get_block_number();
+                                info!("chain_loop get block number {:?}", res);
+                                if let Ok(res) = res {
                                     if let Some(qh) = ChainOp::parse_json_height(res) {
                                         op.chain_height = Some((Instant::now(), qh));
                                         h = Some(qh);
                                     }
+                                } else {
+                                    warn!("chain_loop can't get block number");
+                                    continue;
                                 }
                             }
 
@@ -328,7 +334,7 @@ async fn chain_loop(
                                 //     nonce_str,
                                 //     tx.get_data()
                                 // );
-                                info!("generate_transaction ok");
+                                debug!("generate_transaction ok");
                                 tx.set_nonce(nonce_str);
                                 if op.tx_empty() {
                                     if let Some(hash) = op.chain_to_sign_data(&tx) {
@@ -361,7 +367,7 @@ async fn chain_loop(
                             }
                             let nstr = tx.get_nonce();
                             let nonce = u64::from_str_radix(nstr, 16).unwrap();
-                            info!("get nonce {:?} data {:x?}", nonce, tx.get_data());
+                            trace!("get nonce {:?} data {:x?}", nonce, tx.get_data());
                             let mut utx = UnverifiedTransaction::new();
                             utx.set_transaction(tx.clone());
                             let mut sign_data = sign_data.clone();
@@ -387,6 +393,8 @@ async fn chain_loop(
                                     }
                                 }
                             }
+                        } else {
+                            info!("not find signed id {}", id);
                         }
                     }
                     // timestamp should add,and check
@@ -439,7 +447,7 @@ async fn chain_loop(
 async fn send_onchain_info(mut stream: TcpStream) -> Result<()> {
     let mut flag: u64 = 0;
     loop {
-        std::thread::sleep(std::time::Duration::new(3, 0));
+        std::thread::sleep(std::time::Duration::new(15, 0));
         let data_str = format!(
             "{{
             \"cardNo\":\"FF{}\",
@@ -449,7 +457,7 @@ async fn send_onchain_info(mut stream: TcpStream) -> Result<()> {
             flag, flag
         );
 
-        //info!("----------- {}",data_str);
+        info!("client send to chain: {}", data_str);
         let mut buff = flag.to_be_bytes().to_vec();
         buff.extend(data_str.as_bytes());
 
@@ -481,19 +489,19 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
         let mut head_buff = vec![0; 10];
         reader.read_exact(&mut head_buff).await?;
         if !Header::is_flag_ok(&head_buff) {
+            warn!("client get header falg not ok");
             continue;
         }
 
         let header = Header::parse(&head_buff[2..]);
+        info!("client get header {:?} ", header);
         let mut body = vec![0; header.len as usize];
         reader.read_exact(&mut body).await?;
-
         if header.ptype == TYPE_CHIP_REQ {
             let key_create: Vec<u8> = vec![0x80, 0x45, 0x00, 0x00, 0x00];
             let get_data: Vec<u8> = vec![0x00, 0xC0, 0x00, 0x00, 0x40];
             let tobe_sign: Vec<u8> = vec![0x80, 0x46, 0x00, 0x00, 0x20];
             if &body[0..5] == &key_create[0..] {
-                info!("client to be key create {:?} ", header);
                 let data = Payload::pack_chip_data(ChipCommand::ChipReady, None);
                 let mut ack_header = header;
                 ack_header.ptype = TYPE_CHIP_RES;
@@ -504,7 +512,6 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
                 sent_info.push(0x90);
                 sent_info.push(0x00);
             } else if &body[0..5] == &tobe_sign[0..] {
-                info!("client to be sign header {:?} ", header);
                 let data = Payload::pack_chip_data(ChipCommand::ChipReady, None);
                 let mut ack_header = header;
                 ack_header.ptype = TYPE_CHIP_RES;
@@ -517,7 +524,6 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
                 sent_info.push(0x90);
                 sent_info.push(0x00);
             } else if &body[0..5] == &get_data[0..] {
-                info!("client to get data {:?} ", header);
                 let mut ack_header = header;
                 ack_header.ptype = TYPE_CHIP_RES;
                 ack_header.len = sent_info.clone().len() as u32;
