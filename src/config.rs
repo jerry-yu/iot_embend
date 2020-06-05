@@ -6,6 +6,7 @@ pub struct AllConfig {
     pub dev_conf: DevAddr,
     pub dev_file: String,
     pub client_start: bool,
+    pub client_send_limit: usize,
 }
 
 #[derive(Clone, Deserialize, Default, Debug)]

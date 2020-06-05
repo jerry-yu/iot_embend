@@ -1,19 +1,14 @@
-use crate::handler::{sm3, Address, H256};
+use crate::handler::{sm3, Address};
 use crate::Result;
 use async_std::sync::{Arc, Mutex};
 use cita_tool::{
-    client::{
-        basic::{Client, ClientExt},
-        remove_0x, TransactionOptions,
-    },
-    decode, encode,
-    protos::blockchain::{Transaction, UnverifiedTransaction},
+    client::remove_0x,
+    protos::blockchain::Transaction,
     rpctypes::{JsonRpcResponse, ParamsValue, ResponseValue},
     ProtoMessage,
 };
-use rusqlite::{params, Connection, Statement, NO_PARAMS};
-use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use rusqlite::{params, Connection, NO_PARAMS};
+use std::collections::VecDeque;
 use std::time::Instant;
 
 pub const TABLE_SQL: &'static str = " 
@@ -33,7 +28,6 @@ pub struct RawChainData {
 #[derive(Clone)]
 pub enum ChainInfo {
     SuccHash(String),
-    Height(usize),
     UnsignHash(u16, Vec<u8>),
     SignedHash(u64, String),
 }
@@ -134,16 +128,16 @@ impl ChainOp {
         Ok(())
     }
 
-    pub fn need_config(&self) -> bool {
-        if self.dst_account.is_none() || self.url.is_none() {
-            return true;
-        }
-        false
-    }
+    // pub fn need_config(&self) -> bool {
+    //     if self.dst_account.is_none() || self.url.is_none() {
+    //         return true;
+    //     }
+    //     false
+    // }
 
-    pub fn save_chain_info(&mut self, info: ToChainInfo) {
-        self.saved_info.push(info);
-    }
+    // pub fn save_chain_info(&mut self, info: ToChainInfo) {
+    //     self.saved_info.push(info);
+    // }
 
     pub fn save_tx(&mut self, idx: u16, tx: Transaction) {
         self.saved_tx.push_back((idx, tx));

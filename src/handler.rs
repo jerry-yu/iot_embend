@@ -1,26 +1,14 @@
 use async_std::prelude::*;
-use async_std::task;
-use cita_tool::{
-    client::basic::Client,
-    protos::blockchain::{Transaction, UnverifiedTransaction},
-    H160, H512,
-};
+use cita_tool::{H160, H512};
 use log::{info, trace};
 
 pub use cita_tool::H256;
 //pub use ethereum_types::{};
-use crate::payload::{ChipCommand, Header, Payload, TYPE_CHIP_REQ};
+use crate::payload::{ChipCommand, Payload, TYPE_CHIP_REQ};
 use async_std::net::TcpStream;
-use futures::{channel::mpsc, select, FutureExt, SinkExt};
 pub use libsm::sm3;
 use std::collections::{BTreeMap, VecDeque};
-use std::convert::TryInto;
-use std::io::Read;
-use std::str::FromStr;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::net::Shutdown;
 
 pub type Address = H160;
 pub type PK = H512;
@@ -87,35 +75,52 @@ impl Iot {
 
     pub async fn send_net_data(&mut self, id: usize, data: &[u8]) -> std::io::Result<()> {
         if let Some(tcp) = self.links.get_mut(&id) {
-            trace!("send net data single idx:{} data: {:x?}", id, data);
-            tcp.write_all(data).await?;
+            let res = tcp.write_all(data).await;
+            trace!(
+                "send net data single idx:{} data: {:x?} res {:?}",
+                id,
+                data,
+                res
+            );
+            if res.is_err() {
+                let _ = tcp.shutdown(Shutdown::Both);
+                self.remove_stream_by_id(id);
+            }
+            return res;
         }
         Ok(())
     }
 
-    pub async fn send_sign_data(&mut self) -> std::io::Result<()> {
+    pub async fn send_sign_data(&mut self, id: usize) -> std::io::Result<()> {
         if let Some((req_id, hash)) = self.get_first_tobe_signed_data() {
             let data = Payload::pack_chip_data(ChipCommand::Signature, Some(hash));
             let mut buf = Payload::pack_head_data(TYPE_CHIP_REQ, req_id, data.len() as u32);
             buf.extend(data);
             trace!("send tobe sig hash req id {}", req_id);
-            self.send_any_net_data(&buf).await?;
+            self.send_net_data(id, &buf).await?;
         }
         Ok(())
     }
 
-    pub async fn remove_stream_by_id(&mut self, stream_id: usize) {
+    pub fn remove_stream_by_id(&mut self, stream_id: usize) {
         self.links.remove(&stream_id);
     }
 
     pub async fn send_any_net_data(&mut self, data: &[u8]) -> std::io::Result<usize> {
         let mut res = Err(std::io::ErrorKind::NotFound.into());
+        let mut bad_ids = Vec::new();
         for (idx, tcp) in &mut self.links {
             trace!("send net data idx:{} data: {:x?}", idx, data);
             res = tcp.write_all(data).await;
             if res.is_ok() {
                 return Ok(*idx);
+            } else {
+                let _ = tcp.shutdown(Shutdown::Both);
+                bad_ids.push(*idx);
             }
+        }
+        for id in bad_ids {
+            self.remove_stream_by_id(id);
         }
         Err(res.unwrap_err())
     }

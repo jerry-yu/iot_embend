@@ -1,4 +1,4 @@
-#![recursion_limit = "1024"]
+#![recursion_limit = "2048"]
 
 mod chain;
 mod config;
@@ -7,8 +7,8 @@ mod payload;
 
 use async_std::fs;
 use async_std::future;
-use async_std::io::{self, BufReader};
-use async_std::net::{SocketAddr, TcpListener, TcpStream};
+use async_std::io::BufReader;
+use async_std::net::{TcpListener, TcpStream};
 use async_std::prelude::*;
 use async_std::sync::{Arc, Mutex};
 use async_std::task;
@@ -17,24 +17,21 @@ use cita_tool::{
         basic::{Client, ClientExt},
         remove_0x, TransactionOptions,
     },
-    decode, encode, encode_params,
-    protos::blockchain::{Transaction, UnverifiedTransaction},
-    rpctypes::{JsonRpcResponse, ParamsValue, ResponseValue},
-    ProtoMessage, H256, U256,
+    encode, encode_params,
+    protos::blockchain::UnverifiedTransaction,
+    ProtoMessage, H256,
 };
 
 use chain::{ChainInfo, ChainOp, RawChainData, ToChainInfo, TABLE_SQL};
-use cita_tool::{
-    pubkey_to_address, sign, sm2_sign, CreateKey, Encryption, Hashable, KeyPair, Message,
-    PrivateKey, PubKey, Signature, Sm2KeyPair, Sm2Privkey, Sm2Pubkey, Sm2Signature,
-};
+use cita_tool::{sign, Encryption, KeyPair, PrivateKey};
 use clap::{App, Arg};
 use config::{AllConfig, Config, DevAddr};
 use futures::{channel::mpsc, select, FutureExt, SinkExt};
 use handler::{sm3, Address, Iot, PK};
 use log::{debug, error, info, trace, warn};
 use payload::{
-    ChipCommand, Header, Payload, TYPE_CHIP_REQ, TYPE_CHIP_RES, TYPE_RAW_DATA, TYPE_RAW_DATA_RES,
+    ChipCommand, Header, Payload, TYPE_CHIP_REQ, TYPE_CHIP_RES, TYPE_ERR_NOTIFY, TYPE_RAW_DATA,
+    TYPE_RAW_DATA_RES,
 };
 use rand::Rng;
 use rusqlite::{Connection, NO_PARAMS};
@@ -43,7 +40,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 const CHAIN_VIST_INTERVAL: u64 = 1;
-const CHAIN_HEIGHT_TIMES: u64 = 5;
+const CHAIN_HEIGHT_TIMES: u64 = 30;
 
 //const CONF_DIR: &'static str = "./conf";
 const FUNC_HASH: &'static str = "fc934fed";
@@ -59,20 +56,28 @@ async fn network_process(
     mut net_to_main: mpsc::UnboundedSender<(usize, Header, Vec<u8>)>,
 ) -> Result<()> {
     let mut reader = BufReader::new(net_reader.clone());
-    loop {
+    let _err = loop {
         let mut head_buff = vec![0; 10];
-        reader.read_exact(&mut head_buff).await?;
+        let res = reader.read_exact(&mut head_buff).await;
+        if res.is_err() {
+            break res;
+        }
         if !Header::is_flag_ok(&head_buff) {
             warn!("Header's leader byte not 0x55AA");
             continue;
         }
         let header = Header::parse(&head_buff[2..]);
         let mut body = vec![0; header.len as usize];
-        reader.read_exact(&mut body).await?;
+        let res = reader.read_exact(&mut body).await;
+        if res.is_err() {
+            break res;
+        }
         trace!("net read data header {:?},body {:x?}", header, body);
         net_to_main.send((id, header, body)).await?;
         trace!("net read data send ok");
-    }
+    };
+    net_to_main.send((id, Header::default(), vec![])).await?;
+    Ok(())
 }
 
 fn get_pk_from_file(dfile: String) -> Option<Vec<u8>> {
@@ -172,13 +177,16 @@ async fn main_process(
                             let res = ChainOp::insert_raw_data(sql_con.clone(),nonce,value,&str_data).await;
                             if let Ok(_) = res {
                                 let buf = Payload::pack_head_data(TYPE_RAW_DATA_RES,header.id,0);
-                                iot.send_net_data(stream_id, &buf).await;
-                                info!("main recv sid {} header {:?} data {:x?}",stream_id,header,str_data);
+                                let res = iot.send_net_data(stream_id, &buf).await;
+                                if let Ok(_) =res {
+                                    info!("main recv sid {} header {:?} data {:x?}",stream_id,header,str_data);
                                 main_to_chain.send(ToChainInfo::Data(RawChainData {
                                     nonce,
                                     value:value,
                                     data:str_data})).await?;
-
+                                } else {
+                                    info!("main stream id {} not ok",stream_id);
+                                }
                             } else {
                                 error!("inert data error {:?}",res);
                             }
@@ -195,7 +203,7 @@ async fn main_process(
                                 };
                                 let mut hbuf = Payload::pack_head_data(TYPE_CHIP_REQ, header.id, data.len() as u32);
                                 hbuf.extend(data);
-                                iot.send_net_data(stream_id, &hbuf).await;
+                                let _ = iot.send_net_data(stream_id, &hbuf).await;
                             } else {
                                 error!("chip return error respone {:x}{:x}, expect 0x6140",payload[0], payload[1]);
                             }
@@ -205,7 +213,7 @@ async fn main_process(
                                 if header.id > 0 {
                                     iot.remove_signed_data(header.id);
                                     main_to_chain.send(ToChainInfo::Sign(header.id,payload)).await?;
-                                    iot.send_sign_data().await;
+                                    let _ = iot.send_sign_data(stream_id).await;
                                 } else {
                                     main_to_chain.send(ToChainInfo::SelfPK(payload.clone())).await?;
                                     iot.self_pk = Some(payload.clone());
@@ -233,7 +241,7 @@ async fn main_process(
                                         .open(iot.dev_file.clone())
                                         .await?;
                                     fs.write_all(&dev_data).await?;
-                                    iot.send_sign_data().await;
+                                    let _ = iot.send_sign_data(stream_id).await;
                                 }
                             } else {
                                 error!("chip return error status {:x}{:x} expect 0x9000",payload[0x40], payload[0x41]);
@@ -242,6 +250,8 @@ async fn main_process(
                             warn!("Unkown payload len {} data {:#?}",len,payload);
                         }
 
+                    } else if header.ptype ==TYPE_ERR_NOTIFY{
+                        iot.remove_stream_by_id(stream_id);
                     } else {
                         warn!("recive unkown header type {:?}",header);
                     }
@@ -258,9 +268,9 @@ async fn main_process(
                         let data = Payload::pack_chip_data(ChipCommand::CreateKeyPair,None);
                         let mut hbuf = Payload::pack_head_data(TYPE_CHIP_REQ, 0, data.len() as u32);
                         hbuf.extend(data);
-                        iot.send_net_data(stream_id, &hbuf).await;
+                        let _ =iot.send_net_data(stream_id, &hbuf).await;
                     } else {
-                        iot.send_sign_data().await;
+                        let _ = iot.send_sign_data(stream_id).await;
                     }
                 },
                 None => break,
@@ -409,8 +419,7 @@ async fn chain_loop(
                     ToChainInfo::DstAccount(addr) => {
                         info!("chain_loop dst  {}", addr);
                         op.dst_account = Some(addr);
-                    }
-                    _ => {}
+                    } //_ => {}
                 }
             }
             Ok(None) => {}
@@ -421,7 +430,7 @@ async fn chain_loop(
                     Instant::now(),
                 );
                 // If not Recieve message from main,resend message
-                if count % CHAIN_HEIGHT_TIMES == 4 {
+                if count % CHAIN_HEIGHT_TIMES == CHAIN_HEIGHT_TIMES - 1 {
                     if let Some((id, tx)) = op.first_tx() {
                         if let Some(buf) = op.chain_to_sign_data(&tx) {
                             chain_to_main.send(ChainInfo::UnsignHash(id, buf)).await?;
@@ -444,8 +453,8 @@ async fn chain_loop(
     }
 }
 
-async fn send_onchain_info(mut stream: TcpStream) -> Result<()> {
-    let mut flag: u64 = 0;
+async fn send_onchain_info(mut stream: TcpStream, limit: usize) -> Result<()> {
+    let mut flag: usize = 0;
     loop {
         std::thread::sleep(std::time::Duration::new(15, 0));
         let data_str = format!(
@@ -467,11 +476,14 @@ async fn send_onchain_info(mut stream: TcpStream) -> Result<()> {
         let buff = Payload::pack_head_and_payload(header, buff);
         stream.write_all(&buff).await?;
         flag += 1;
+        if flag >= limit && limit != 0 {
+            break;
+        }
     }
     Ok(())
 }
 
-async fn client_start(all_config: AllConfig) -> Result<()> {
+async fn client_start(config: AllConfig) -> Result<()> {
     let sk = PrivateKey::from_str(
         "6ff0a6e8cd3b19cfc17503a8cdf4b7fc5aafe63ab81749a32b7fb5555eb8771f",
         Encryption::from_str("sm2").unwrap(),
@@ -483,7 +495,7 @@ async fn client_start(all_config: AllConfig) -> Result<()> {
     let mut reader = BufReader::new(stream.clone());
     let mut sent_info: Vec<u8> = Vec::new();
 
-    task::spawn(send_onchain_info(stream.clone()));
+    task::spawn(send_onchain_info(stream.clone(), config.client_send_limit));
 
     loop {
         let mut head_buff = vec![0; 10];

@@ -1,12 +1,13 @@
 use std::convert::TryInto;
 
+pub const TYPE_ERR_NOTIFY: u8 = 0;
 pub const TYPE_CHIP_REQ: u8 = 1;
 pub const TYPE_CHIP_RES: u8 = 2;
 pub const TYPE_RAW_DATA: u8 = 3;
 pub const TYPE_RAW_DATA_RES: u8 = 4;
 
 pub enum ChipCommand {
-    Select,
+    //Select,
     CreateKeyPair,
     GetPK,
     Signature,
@@ -22,9 +23,9 @@ impl Payload {
         match cmd {
             ChipCommand::CreateKeyPair => vec![0x80, 0x45, 0x00, 0x00, 0x00],
             ChipCommand::GetPK | ChipCommand::GetSignature => vec![0x00, 0xC0, 0x00, 0x00, 0x40],
-            ChipCommand::Select => vec![
-                0x00, 0xA4, 0x04, 0x00, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
-            ],
+            // ChipCommand::Select => vec![
+            //     0x00, 0xA4, 0x04, 0x00, 0x06, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            // ],
             ChipCommand::Signature => {
                 let mut v: Vec<u8> = vec![0x80, 0x46, 0x00, 0x00, 0x20];
                 if in_data.is_none() {
@@ -34,7 +35,7 @@ impl Payload {
                 v
             }
             ChipCommand::ChipReady => vec![0x61, 0x40],
-            _ => vec![],
+            //_ => vec![],
         }
     }
 
